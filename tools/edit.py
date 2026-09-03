@@ -185,7 +185,7 @@ def _py_syntax_check(p: Path) -> str:
 @tool
 def edit(path: str, old_string: str = "", new_string: str = "", replace_all: bool = False,
           near_line: int = 0, line_start: int = 0, line_end: int = 0,
-          edits: list | str | None = None) -> str:
+          edits: list | str | None = None, expected_hash: str = "") -> str:
     """Modify an EXISTING file. Three modes — pick one:
     STRING (default): old_string→new_string; old_string must be a unique substring of
     the file (or replace_all=true). near_line disambiguates when old_string matches >1 place.
@@ -246,6 +246,21 @@ def edit(path: str, old_string: str = "", new_string: str = "", replace_all: boo
             return f"[error] file not found: {path}"
         shown = str(p) if note else path
         cow = f"\nNOTE: {note}" if note else ""
+
+        try:
+            from aegis.context import current_context
+            from aegis.core import sha256_file
+            aegis_bound = current_context() is not None
+        except Exception:
+            aegis_bound = False
+        if aegis_bound:
+            if not expected_hash:
+                return "[AEGIS:EXPECTED_HASH_REQUIRED] inspect with aegis_file_state before editing"
+            if sha256_file(p) != expected_hash.strip().lower():
+                return (
+                    "[AEGIS:CONCURRENT_MODIFICATION_DETECTED] the file changed after it was "
+                    "inspected; read it again before retrying"
+                )
 
         content = p.read_text(encoding="utf-8")
         descriptions = []

@@ -9,7 +9,12 @@ _WRITE_CHUNK_BYTES = 256 * 1024
 
 
 @tool
-def write_file(path: str, content: str, overwrite: bool = False) -> str:
+def write_file(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+    expected_hash: str = "",
+) -> str:
     """Create a new workspace file, or replace the whole file when overwrite=true.
 
     Use this for full-file writes:
@@ -51,6 +56,21 @@ def write_file(path: str, content: str, overwrite: bool = False) -> str:
             )
         if p.exists() and not overwrite:
             return f"[error] file exists: {p} ({p.stat().st_size} bytes) — use edit for changes, or retry with overwrite=true to replace the whole file"
+        if p.exists() and overwrite:
+            try:
+                from aegis.context import current_context
+                from aegis.core import sha256_file
+                aegis_bound = current_context() is not None
+            except Exception:
+                aegis_bound = False
+            if aegis_bound:
+                if not expected_hash:
+                    return "[AEGIS:EXPECTED_HASH_REQUIRED] inspect with aegis_file_state before overwriting"
+                if sha256_file(p) != expected_hash.strip().lower():
+                    return (
+                        "[AEGIS:CONCURRENT_MODIFICATION_DETECTED] the file changed after it was "
+                        "inspected; read it again before retrying"
+                    )
         prev_size = p.stat().st_size if p.exists() else None
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(p.suffix + ".tmp")

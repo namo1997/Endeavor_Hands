@@ -85,11 +85,13 @@ http://127.0.0.1:8765/ui
 
 ## Tools ที่ ChatGPT เห็นในปัจจุบัน
 
-ปัจจุบัน schema มี 11 tools:
+ปัจจุบัน schema มี 16 tools:
 
 | งาน | Tool |
 |---|---|
-| รันคำสั่งสั้น, ค้นหา, Git, test, build | `bash` |
+| สร้าง/ตรวจ/เพิกถอน Working Envelope และอ่าน hash ไฟล์ | `aegis_start_session`, `aegis_status`, `aegis_file_state`, `aegis_revoke` |
+| รันคำสั่งสั้น, ค้นหา, test, build | `bash` |
+| Git แบบ guarded | `git` |
 | รันงาน shell แบบ background | `bash_bg` |
 | รัน Python สำหรับวิเคราะห์หรือ test | `python_exec` |
 | อ่านโค้ด, เอกสาร, เสียง/วิดีโอ และภาพ | `read_file` |
@@ -97,6 +99,12 @@ http://127.0.0.1:8765/ui
 | แก้ไฟล์เดิมเฉพาะจุด | `edit` |
 | ดู/ควบคุมแอปบน Mac | `computer` |
 | เชื่อมต่อ MCP server อื่น | `mcp_list_tools`, `mcp_call_tool`, `mcp_add_server`, `mcp_remove_server` |
+
+ก่อนใช้ tool ที่มีผลต่อเครื่อง ให้ผู้ใช้อนุญาต root ของงานในบทสนทนาก่อน
+แล้วเรียก `aegis_start_session` จากนั้นส่ง `session_id` และ
+`working_envelope_id` ที่ได้ให้ทุก effectful tool ในแชตนั้น ห้ามนำ ID
+จากคนละแชตมาปนกัน ก่อนแก้หรือแทนที่ไฟล์เดิมต้องเรียก `aegis_file_state`
+และส่ง `sha256` กลับมาเป็น `expected_hash` เมื่อจบงานให้เรียก `aegis_revoke`
 
 ### การอ่านภาพ
 

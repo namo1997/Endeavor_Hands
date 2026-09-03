@@ -15,6 +15,11 @@ Endeavor Hands is a privileged local macOS MCP stdio server. The model is the pl
 
 Safety boundaries are product behavior, not implementation details.
 
+AEGIS sits between the MCP schema and every effectful implementation. The exact
+`session_id + working_envelope_id` pair, immutable canonical root/capabilities,
+state/expiry/revocation, and request-local binding are mandatory. Read-only
+`read_file` remains a separate protected read plane.
+
 ## Start every task
 
 Before editing:
@@ -28,6 +33,9 @@ Before editing:
 ## Non-negotiable boundaries
 
 - MCP protocol output stays on stdout only; diagnostics use stderr/logging.
+- No effectful tool runs without an ACTIVE exact AEGIS pair and required capability.
+- Subprocess writes are allow-listed to the immutable root; unlink is globally denied except narrowly scoped Git metadata.
+- Direct existing-file mutation requires a current `expected_hash`; jobs and dynamic MCP registrations remain envelope-owned.
 - `edit` and replacement of an existing file require explicit user permission for the top-level folder on first use in a session.
 - Never fabricate or auto-use a permission nonce before the user approves it.
 - Protected paths/credentials remain unreadable or unmodifiable according to the documented boundary.

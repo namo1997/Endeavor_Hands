@@ -214,10 +214,16 @@ def metadata_from_result(text: str) -> dict[str, object]:
     return meta
 
 
-_SENSITIVE_NAME_RE = re.compile(r"(?:password|passwd|secret|token|api[_-]?key|authorization|credential|grant_phrase|headers?_json)", re.I)
+_SENSITIVE_NAME_RE = re.compile(
+    r"(?:password|passwd|secret|token|api[_-]?key|authorization|credential|"
+    r"grant_phrase|headers?_json|session_id|working_envelope_id)",
+    re.I,
+)
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _JSON_SECRET_RE = re.compile(
-    r'(?i)(["\']?(?:authorization|api[_-]?key|token|secret|password)["\']?\s*[:=]\s*["\']?)([^"\'\s,}]+)'
+    r'(?i)(["\']?(?:authorization|api[_-]?key|token|secret|password|sessionId|'
+    r'session_id|workingEnvelopeId|working_envelope_id)["\']?\s*[:=]\s*["\']?)'
+    r'([^"\'\s,}]+)'
 )
 _ENV_SECRET_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|APIKEY))=([^\s]+)")
 

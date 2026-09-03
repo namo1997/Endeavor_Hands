@@ -31,6 +31,8 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 
 from agent_log import AgentLogger
+from aegis import AegisError, AegisStore
+from config import AEGIS_DATA_ROOT
 
 from tools.bash import _bash_impl
 from tools.git import _git_impl
@@ -38,7 +40,7 @@ from tools.python_exec import _python_exec_impl
 from tools.read_file import _IMAGE_EXT, _read_file_impl
 from tools.computer_use import _computer_impl, pop_last_image_path
 
-from tools.bash_bg import bash_bg as _bash_bg_tool
+from tools.bash_bg import bash_bg as _bash_bg_tool, kill_envelope_jobs
 from tools.write_file import write_file as _write_file_tool
 from tools.edit import edit as _edit_tool
 from tools._safety import plan_write
@@ -58,6 +60,11 @@ _logger = AgentLogger()
 _LIFECYCLE_LOG = Path(__file__).resolve().parent / "logs" / "server_lifecycle.jsonl"
 _FAULT_LOG = Path(__file__).resolve().parent / "logs" / "server_faults.log"
 _FAULT_LOG_HANDLE = None
+_AEGIS = AegisStore(AEGIS_DATA_ROOT)
+
+
+def _aegis_error(exc: AegisError) -> str:
+    return exc.render()
 
 
 def _append_lifecycle(event: str, **metadata) -> None:
@@ -152,14 +159,20 @@ def _logged(name: str):
 
 
 mcp = FastMCP(
-	"Endeavor Hands",
-    instructions="""You are connected to Endeavor, the user's local Mac workspace assistant.
+    "AEGIS-protected Endeavor Hands",
+    instructions="""You are connected to AEGIS-protected Endeavor, the user's local Mac workspace assistant.
 
 When the user asks to inspect, search, create, modify, test, build, run, or otherwise work with files,
 projects, processes, or apps on their computer, use the Endeavor tools instead of only describing how to
 do the task. Use read_file for text files and local images, write_file for new or complete files, edit for
 existing files, bash for searches/tests/builds/short commands, git for guarded repository operations,
-python_exec for Python analysis, and computer for visible Mac app interaction. The workspace is the user's Desktop.
+python_exec for Python analysis, and computer for visible Mac app interaction.
+
+Before any effectful tool, call aegis_start_session only after the user has explicitly authorized the task
+and exact working root in this conversation. Keep the returned session_id + working_envelope_id pair and
+pass both to every effectful call. Never mix identifiers across chats. A Working Envelope has one immutable
+canonical root, capability set, expiry, revocation state, and audit trail. For edit or overwrite of an
+existing file, call aegis_file_state first and pass its sha256 as expected_hash.
 
 For read-only requests, do not modify files. For requested changes, work only within the user's stated
 scope, verify relevant results with an appropriate Endeavor tool, and report the files changed. Files may
@@ -169,13 +182,119 @@ perform or approve it explicitly.""",
 )
 
 
+# ── AEGIS control plane ───────────────────────────────────────────────────
+@mcp.tool()
+@_logged("aegis_start_session")
+def aegis_start_session(
+    root: str,
+    capabilities_json: str = "[]",
+    ttl_minutes: int = 480,
+) -> str:
+    """Create one ACTIVE, immutable Working Envelope after explicit user authorization.
+
+    root must be an existing absolute directory and cannot be /, the whole home directory,
+    a protected system directory, or AEGIS internal state. capabilities_json must be a JSON
+    list selected from: file_write, process_exec, git, computer_control, mcp_call, mcp_manage.
+    The returned session_id and working_envelope_id are an exact pair; pass both to every
+    effectful tool. sessionToken is the non-secret selector marker "context".
+    """
+    try:
+        capabilities = json.loads(capabilities_json)
+        if not isinstance(capabilities, list):
+            return "[AEGIS:INVALID_CAPABILITIES] capabilities_json must be a JSON list"
+        grant = _AEGIS.create_envelope(
+            root=root,
+            capabilities=capabilities,
+            ttl_minutes=ttl_minutes,
+        )
+    except json.JSONDecodeError as exc:
+        return f"[AEGIS:INVALID_CAPABILITIES] invalid JSON: {exc}"
+    except AegisError as exc:
+        return _aegis_error(exc)
+    return json.dumps(
+        {
+            "state": grant.state,
+            "sessionId": grant.session_id,
+            "workingEnvelopeId": grant.working_envelope_id,
+            "sessionToken": "context",
+            "root": grant.root,
+            "capabilities": sorted(grant.capabilities),
+            "expiresAt": grant.expires_at,
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+@_logged("aegis_status")
+def aegis_status(session_id: str, working_envelope_id: str) -> str:
+    """Return state for the exact session_id + working_envelope_id pair."""
+    try:
+        grant = _AEGIS.status(session_id, working_envelope_id)
+    except AegisError as exc:
+        return _aegis_error(exc)
+    return json.dumps(
+        {
+            "state": grant.state,
+            "root": grant.root,
+            "capabilities": sorted(grant.capabilities),
+            "createdAt": grant.created_at,
+            "expiresAt": grant.expires_at,
+            "revokedAt": grant.revoked_at,
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+@_logged("aegis_file_state")
+def aegis_file_state(session_id: str, working_envelope_id: str, path: str) -> str:
+    """Return canonical path, size, mtime, and sha256 for optimistic file mutation.
+
+    Call immediately before edit or write_file(overwrite=true), then pass the returned
+    sha256 as expected_hash. The path must remain inside the immutable Working Envelope.
+    """
+    try:
+        state = _AEGIS.file_state(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            path=path,
+        )
+    except AegisError as exc:
+        return _aegis_error(exc)
+    return json.dumps(state, ensure_ascii=False)
+
+
+@mcp.tool()
+@_logged("aegis_revoke")
+def aegis_revoke(session_id: str, working_envelope_id: str) -> str:
+    """Revoke the exact Working Envelope and stop its owned background jobs."""
+    try:
+        grant = _AEGIS.revoke(session_id, working_envelope_id)
+    except AegisError as exc:
+        return _aegis_error(exc)
+    stopped = kill_envelope_jobs(session_id, working_envelope_id)
+    return json.dumps(
+        {"state": grant.state, "revokedAt": grant.revoked_at, "jobsStopped": stopped}
+    )
+
+
 # ── bash ────────────────────────────────────────────────────────────────────
 @mcp.tool()
 @_logged("bash")
-def bash(command: str, timeout: int = 30) -> str:
+def bash(
+    command: str,
+    timeout: int = 30,
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """Run a bash command on the local machine (cwd = workspace) — system operations, run scripts,
     check processes/disk/memory. NOT for arithmetic, math, or data analysis (pandas/statistics) —
     use python_exec for those; never for shell-wrapped Python.
+
+    AEGIS: requires the exact session_id + working_envelope_id with process_exec. The cwd is the
+    immutable envelope root. The macOS sandbox denies every write outside that root (except
+    /private/tmp) and denies source unlink everywhere.
 
     GUI scripting via bash is NOT available (osascript System Events is blocked by this tool's
     sandbox) — for clicking/typing/screen interaction use the `computer` tool instead, not osascript.
@@ -199,7 +318,7 @@ def bash(command: str, timeout: int = 30) -> str:
     fallback); rg --files | rg "\\.md$" (find by name/pattern); rg -n "needle" path_or_dir (search text
     with line numbers).
 
-    FILE WRITE — sandboxed: workspace/ (currently ~/Desktop) and /tmp allow writes. cwd is ALREADY
+    FILE WRITE — sandboxed: the immutable Working Envelope root and /tmp allow writes. cwd is ALREADY
     workspace/ — do not
     re-prefix "workspace/" onto the output path (writes one level too deep).
       ❌ screencapture workspace/shot.png  -> lands at workspace/workspace/shot.png
@@ -208,7 +327,16 @@ def bash(command: str, timeout: int = 30) -> str:
     Output cap: output over 10,000 chars is truncated; the FULL output is saved to a workspace file
     whose path is in the leading "[bash] truncated: ..." marker.
     """
-    return _bash_impl(command, timeout)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="process_exec",
+            tool="bash",
+        ):
+            return _bash_impl(command, timeout)
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── git ─────────────────────────────────────────────────────────────────────
@@ -223,8 +351,13 @@ def git(
     branch: str = "",
     staged: bool = False,
     timeout: int = 60,
+    session_id: str = "",
+    working_envelope_id: str = "",
 ) -> str:
     """Guarded Git operations for repositories inside the approved workspace.
+
+    AEGIS: requires the exact session_id + working_envelope_id with git capability. Repository
+    paths are contained in the immutable envelope root.
 
     Use this instead of bash for Git mutation. Supported actions: status, diff, add, commit, push.
     `add` requires explicit paths; `commit` commits only already-staged changes; `push` uses an
@@ -238,23 +371,42 @@ def git(
     change. Source-file deletion remains blocked; the extra unlink permission is scoped only to the
     selected repository's Git metadata directory.
     """
-    return _git_impl(
-        action=action,
-        repo=repo,
-        paths=paths,
-        message=message,
-        remote=remote,
-        branch=branch,
-        staged=staged,
-        timeout=timeout,
-    )
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="git",
+            tool="git",
+            paths=(repo,),
+        ):
+            return _git_impl(
+                action=action,
+                repo=repo,
+                paths=paths,
+                message=message,
+                remote=remote,
+                branch=branch,
+                staged=staged,
+                timeout=timeout,
+            )
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── bash_bg ─────────────────────────────────────────────────────────────────
 @mcp.tool()
 @_logged("bash_bg")
-def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
+def bash_bg(
+    action: str,
+    command: str = "",
+    job_id: str = "",
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """Background bash jobs — start a long-running command without blocking, then poll/list/kill it.
+
+    AEGIS: requires process_exec. Jobs are owned by the exact session/envelope pair; another pair
+    cannot list, poll, or kill them, and aegis_revoke stops the pair's running jobs.
 
     Use for anything that legitimately runs past `bash`'s timeout and where you don't need the
     result the instant it finishes: dev servers (npm start, uvicorn), big downloads, long
@@ -273,16 +425,34 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
     ❌ bash_bg(action="start", command="pytest test_foo.py") — finishes in 5s, just use bash.
     ✅ bash_bg(action="start", command="npm run dev") → poll with status later.
     """
-    return _bash_bg_tool.func(action=action, command=command, job_id=job_id)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="process_exec",
+            tool="bash_bg",
+        ):
+            return _bash_bg_tool.func(action=action, command=command, job_id=job_id)
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── python_exec ───────────────────────────────────────────────────────────
 @mcp.tool()
 @_logged("python_exec")
-def python_exec(code: str, timeout: int = 120, max_chars: int = 10_000) -> str:
+def python_exec(
+    code: str,
+    timeout: int = 120,
+    max_chars: int = 10_000,
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """Run Python code (cwd = workspace) using the SAME interpreter that runs this server — data
     analysis (pandas), statistics (scipy.stats), regression/time-series (statsmodels), machine
     learning (sklearn).
+
+    AEGIS: requires process_exec. cwd and all child-process writes are contained in the immutable
+    envelope root (plus /private/tmp); the former out-of-root skills write exception is disabled.
 
     NOT for: shell commands (use bash), file I/O without Python (use read_file/write_file).
 
@@ -316,7 +486,16 @@ def python_exec(code: str, timeout: int = 120, max_chars: int = 10_000) -> str:
     regardless of the cap — those numbers are NOT samples. Only mention truncation when your
     answer relies on specific rows/values beyond the visible cutoff.
     """
-    return _python_exec_impl(code, timeout, max_chars)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="process_exec",
+            tool="python_exec",
+        ):
+            return _python_exec_impl(code, timeout, max_chars)
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── read_file ───────────────────────────────────────────────────────────────
@@ -447,8 +626,20 @@ def _read_image_file(path: str, max_dimension: int = 2048):
 # ── write_file ────────────────────────────────────────────────────────────
 @mcp.tool()
 @_logged("write_file")
-def write_file(path: str, content: str, overwrite: bool = False, grant_phrase: str = "") -> str:
+def write_file(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+    grant_phrase: str = "",
+    expected_hash: str = "",
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """Create a new workspace file, or replace the whole file when overwrite=true.
+
+    AEGIS: requires exact session_id + working_envelope_id with file_write. The target must be
+    inside the immutable root. Replacing an existing file also requires expected_hash from an
+    immediately preceding aegis_file_state call; stale hashes fail closed.
 
     PERMISSION GATE — replacing a file that ALREADY EXISTS (overwrite=true on an existing
     path) uses the exact same per-folder gate as `edit`: the first such write to a given
@@ -465,28 +656,42 @@ def write_file(path: str, content: str, overwrite: bool = False, grant_phrase: s
     tool never appends and never does partial in-place edits: when overwrite=true it replaces the
     whole file atomically.
 
-    path      : workspace-relative ("notes/out.md", "script.py") or an absolute path outside the
-                workspace ("~/Desktop/out.md")
+    path      : workspace-relative ("notes/out.md", "script.py") or an absolute path inside the
+                immutable Working Envelope
     content   : the exact full file contents to write
     overwrite : default false; if the file already exists, set true only when you intend to replace
                 the entire file
 
-    Outside the workspace: NEW files can be created anywhere except protected system paths; an
-    EXISTING outside file is never replaced in place — the write is redirected to a sibling working
-    copy "name.edited.ext" (the result reports the actual path written).
+    Paths outside the immutable Working Envelope are denied, including brand-new files.
 
     Returns an [error] if the target exists and overwrite is false. For code/scripts, follow with
     `bash` to verify when execution matters.
     """
-    if overwrite:
-        effective_path, err, _note = plan_write(path)
-        if err:
-            return err
-        if os.path.exists(effective_path):
-            grant_err = check_grant(effective_path, grant_phrase)
-            if grant_err:
-                return grant_err
-    return _write_file_tool.func(path=path, content=content, overwrite=overwrite)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="file_write",
+            tool="write_file",
+            paths=(path,),
+        ):
+            if overwrite:
+                effective_path, err, _note = plan_write(path)
+                if err:
+                    return err
+                if os.path.exists(effective_path):
+                    _AEGIS.require_expected_hash(effective_path, expected_hash)
+                    grant_err = check_grant(effective_path, grant_phrase)
+                    if grant_err:
+                        return grant_err
+            return _write_file_tool.func(
+                path=path,
+                content=content,
+                overwrite=overwrite,
+                expected_hash=expected_hash,
+            )
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── edit ──────────────────────────────────────────────────────────────────
@@ -502,8 +707,15 @@ def edit(
     line_end: int = 0,
     edits: list | str | None = None,
     grant_phrase: str = "",
+    expected_hash: str = "",
+    session_id: str = "",
+    working_envelope_id: str = "",
 ) -> str:
     """Modify an EXISTING file. Three modes — pick one:
+
+    AEGIS: requires exact session_id + working_envelope_id with file_write, a path inside the
+    immutable root, and expected_hash from aegis_file_state. A stale hash returns
+    CONCURRENT_MODIFICATION_DETECTED before the write.
 
     PERMISSION GATE — the first edit targeting a given top-level folder this session
     fails with [permission_required] and a one-time nonce. Ask the user directly, in
@@ -526,24 +738,34 @@ def edit(
     already changed by earlier hunks in the SAME batch — order line-based hunks bottom-to-top
     (highest line_start first) if a batch mixes them.
 
-    Use write_file for new files, or write_file with overwrite=true for full rewrites. Files OUTSIDE
-    the workspace are never modified in place: the edit is applied to a sibling working copy
-    "name.edited.ext" (created from the original on the first edit, reused by later edits) — the
-    result reports the copy's path.
+    Use write_file for new files, or write_file with overwrite=true for full rewrites. Paths outside
+    the immutable Working Envelope are denied.
 
     .py files get an inline syntax check after a successful write (✓/⚠ appended to the result) — a
     syntax error is reported but NOT reverted; no separate bash round-trip needed just to catch it.
     """
-    effective_path, err, _note = plan_write(path)
-    if err:
-        return err
-    grant_err = check_grant(effective_path, grant_phrase)
-    if grant_err:
-        return grant_err
-    return _edit_tool.func(
-        path=path, old_string=old_string, new_string=new_string, replace_all=replace_all,
-        near_line=near_line, line_start=line_start, line_end=line_end, edits=edits,
-    )
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="file_write",
+            tool="edit",
+            paths=(path,),
+        ):
+            effective_path, err, _note = plan_write(path)
+            if err:
+                return err
+            _AEGIS.require_expected_hash(effective_path, expected_hash)
+            grant_err = check_grant(effective_path, grant_phrase)
+            if grant_err:
+                return grant_err
+            return _edit_tool.func(
+                path=path, old_string=old_string, new_string=new_string, replace_all=replace_all,
+                near_line=near_line, line_start=line_start, line_end=line_end, edits=edits,
+                expected_hash=expected_hash,
+            )
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── computer ──────────────────────────────────────────────────────────────
@@ -563,10 +785,16 @@ def computer(
     expect: str = "",
     modifiers: str = "",
     app: str = "",
+    session_id: str = "",
+    working_envelope_id: str = "",
 ):
     """Control a native Mac app one guarded action at a time. You see the newest screen image after
     every call (attached to this tool's result) and also receive a compact [OBS] Accessibility/OCR
     element list as text.
+
+    AEGIS: requires the exact session_id + working_envelope_id with computer_control. The capability
+    controls visible apps and is not limited by the filesystem root; secure-field, credential, and
+    destructive-action refusals remain mandatory.
 
     Start with action="see" when state is unknown — attaches the current screenshot and returns
     [OBS obs_N] with eN elements to act on (scroll to reveal more). see/inspect use a separate bounded
@@ -655,48 +883,89 @@ def computer(
     `inspect` zooms into element_id (or the whole observation if omitted) and attaches that crop
     directly as an image — look at it yourself, no separate description step.
     """
-    text_result = _computer_impl(
-        action=action, target=target, text=text, coord=coord, direction=direction,
-        amount=amount, near=near, element_id=element_id, observation_id=observation_id,
-        question=question, expect=expect, modifiers=modifiers, app=app,
-    )
-    img_path, ephemeral = pop_last_image_path()
-    if not img_path:
-        return text_result
     try:
-        data = Path(img_path).read_bytes()
-    except Exception:
-        return text_result
-    finally:
-        if ephemeral:
-            Path(img_path).unlink(missing_ok=True)
-    return [text_result, Image(data=data, format="png")]
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="computer_control",
+            tool="computer",
+        ):
+            text_result = _computer_impl(
+                action=action, target=target, text=text, coord=coord, direction=direction,
+                amount=amount, near=near, element_id=element_id, observation_id=observation_id,
+                question=question, expect=expect, modifiers=modifiers, app=app,
+            )
+            img_path, ephemeral = pop_last_image_path()
+            if not img_path:
+                return text_result
+            try:
+                data = Path(img_path).read_bytes()
+            except Exception:
+                return text_result
+            finally:
+                if ephemeral:
+                    Path(img_path).unlink(missing_ok=True)
+            return [text_result, Image(data=data, format="png")]
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 # ── MCP bridge ────────────────────────────────────────────────────────────
 @mcp.tool()
 @_logged("mcp_list_tools")
-def mcp_list_tools(server: str) -> str:
+def mcp_list_tools(
+    server: str,
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """List the tools exposed by a configured HTTP or local stdio MCP server.
+    Requires the exact AEGIS pair with mcp_call; registrations are isolated per envelope.
     Use to discover what a connected MCP server can do before calling mcp_call_tool.
     If the server name isn't known yet, register it first with mcp_add_server.
     Args:
         server: name of the server, as registered via mcp_add_server or config.MCP_SERVERS
     """
-    return _mcp_list_tools_tool.func(server=server)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="mcp_call",
+            tool="mcp_list_tools",
+        ):
+            return _mcp_list_tools_tool.func(server=server)
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 @mcp.tool()
 @_logged("mcp_call_tool")
-def mcp_call_tool(server: str, tool_name: str, arguments_json: str = "{}") -> str:
+def mcp_call_tool(
+    server: str,
+    tool_name: str,
+    arguments_json: str = "{}",
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """Call a tool exposed by a configured HTTP or local stdio MCP server.
+    Requires the exact AEGIS pair with mcp_call. Remote side effects are not filesystem-contained.
     Run mcp_list_tools first to see available tool names and confirm what arguments they expect.
     Args:
         server: name of the server, as registered via mcp_add_server or config.MCP_SERVERS
         tool_name: exact tool name returned by mcp_list_tools
         arguments_json: JSON object string of arguments for the tool, e.g. '{"query": "..."}' (default: none)
     """
-    return _mcp_call_tool_tool.func(server=server, tool_name=tool_name, arguments_json=arguments_json)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="mcp_call",
+            tool="mcp_call_tool",
+        ):
+            return _mcp_call_tool_tool.func(
+                server=server, tool_name=tool_name, arguments_json=arguments_json
+            )
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 @mcp.tool()
@@ -708,8 +977,12 @@ def mcp_add_server(
     command: str = "",
     args_json: str = "[]",
     cwd: str = "",
+    session_id: str = "",
+    working_envelope_id: str = "",
 ) -> str:
     """Register an HTTP or local stdio MCP server for mcp_list_tools/mcp_call_tool.
+
+    Requires the exact AEGIS pair with mcp_manage. Registration state is private to that envelope.
 
     HTTP: provide `url` plus optional `headers_json`.
     stdio: provide an absolute executable `command`, optional JSON-array `args_json`, and optional
@@ -717,26 +990,50 @@ def mcp_add_server(
     are launched directly without a shell and under Hands' sandbox. Registrations persist under
     Endeavor_Hands/work/tool_mcp/.
     """
-    return _mcp_add_server_tool.func(
-        name=name,
-        url=url,
-        headers_json=headers_json,
-        command=command,
-        args_json=args_json,
-        cwd=cwd,
-    )
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="mcp_manage",
+            tool="mcp_add_server",
+            paths=(cwd,) if cwd else (),
+        ):
+            return _mcp_add_server_tool.func(
+                name=name,
+                url=url,
+                headers_json=headers_json,
+                command=command,
+                args_json=args_json,
+                cwd=cwd,
+            )
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 @mcp.tool()
 @_logged("mcp_remove_server")
-def mcp_remove_server(name: str) -> str:
+def mcp_remove_server(
+    name: str,
+    session_id: str = "",
+    working_envelope_id: str = "",
+) -> str:
     """Remove a previously self-registered MCP server (one added via mcp_add_server).
+    Requires the exact AEGIS pair with mcp_manage and only affects that envelope's registry.
     Only removes entries from the project-local work/tool_mcp registry — has no effect on a server hardcoded in
     config.MCP_SERVERS (that requires a developer to edit config.py).
     Args:
         name: the server name to remove, exactly as passed to mcp_add_server
     """
-    return _mcp_remove_server_tool.func(name=name)
+    try:
+        with _AEGIS.authorized_context(
+            session_id=session_id,
+            working_envelope_id=working_envelope_id,
+            capability="mcp_manage",
+            tool="mcp_remove_server",
+        ):
+            return _mcp_remove_server_tool.func(name=name)
+    except AegisError as exc:
+        return _aegis_error(exc)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,9 @@ def _classify_bash_error(returncode: int, stderr: str, command: str, workspace: 
 _build_sandbox_profile = build_sandbox_profile
 
 def _bash_impl(command: str, timeout: int = 30) -> str:
-    from config import WORKSPACE
+    from aegis.context import current_context
+    from config import get_workspace
+    workspace = get_workspace()
 
     if not command:
         return append_diagnostic(
@@ -35,13 +37,15 @@ def _bash_impl(command: str, timeout: int = 30) -> str:
         return ""
 
     try:
-        profile = _build_sandbox_profile(WORKSPACE)
+        profile = _build_sandbox_profile(
+            workspace, strict_writes=current_context() is not None
+        )
         try:
             result = _SANDBOX_BACKEND.run(
                 ["bash", "-c", command],
                 profile=profile,
                 capture_output=True, text=True,
-                timeout=timeout, cwd=WORKSPACE, stdin=subprocess.DEVNULL,
+                timeout=timeout, cwd=workspace, stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired as e:
             # Return what ran before the timeout instead of discarding it — a command that
@@ -65,7 +69,7 @@ def _bash_impl(command: str, timeout: int = 30) -> str:
                 note += " — partial output before timeout:"
                 # marker_first: same reason as the normal-path call below — tool_loop._bash_each
                 # applies its own secondary cut on top of this result.
-                partial = truncate_with_save(partial, 10_000, WORKSPACE, "bash",
+                partial = truncate_with_save(partial, 10_000, workspace, "bash",
                                               marker_first=True, keep_tail=True)
                 return f"{note}\n{partial}"
             return note
@@ -75,7 +79,7 @@ def _bash_impl(command: str, timeout: int = 30) -> str:
             output += f"\n[stderr]\n{result.stderr}"
         output = output.strip() or "(no output)"
         diagnostic = classify_process_failure(
-            result.returncode, result.stderr or "", command=command, workspace=WORKSPACE,
+            result.returncode, result.stderr or "", command=command, workspace=workspace,
         )
         hint = diagnostic.hint if diagnostic and diagnostic.hint else None
         if hint:
@@ -86,7 +90,7 @@ def _bash_impl(command: str, timeout: int = 30) -> str:
         # recovery-file path. A leading marker survives that secondary cut.
         # keep_tail: build/test errors sit at the end of the output — a head-only cut hides
         # exactly the part that matters most.
-        output = truncate_with_save(output, 10_000, WORKSPACE, "bash", marker_first=True, keep_tail=True)
+        output = truncate_with_save(output, 10_000, workspace, "bash", marker_first=True, keep_tail=True)
         return output
     except FileNotFoundError:
         return append_diagnostic(

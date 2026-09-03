@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -35,6 +36,14 @@ _SERVER_CALL_OUTPUT_CAPS = {
 }
 
 
+def _workspace() -> str:
+    try:
+        from aegis.context import current_root
+        return current_root() or WORKSPACE
+    except Exception:
+        return WORKSPACE
+
+
 def _inside(path: str, root: str) -> bool:
     try:
         return os.path.commonpath((os.path.realpath(path), os.path.realpath(root))) == os.path.realpath(root)
@@ -43,11 +52,22 @@ def _inside(path: str, root: str) -> bool:
 
 
 def _dynamic_path() -> Path:
+    try:
+        from aegis.context import current_identity
+        from config import AEGIS_DATA_ROOT
+        identity = current_identity()
+    except Exception:
+        identity = None
+    if identity:
+        digest = hashlib.sha256(
+            f"{identity[0]}\0{identity[1]}".encode("utf-8")
+        ).hexdigest()
+        return Path(AEGIS_DATA_ROOT) / "mcp" / digest / "servers.json"
     return _WORK_DIR / "tool_mcp" / "servers.json"
 
 
 def _legacy_dynamic_path() -> Path:
-    return Path(WORKSPACE) / "tool_mcp" / "servers.json"
+    return Path(_workspace()) / "tool_mcp" / "servers.json"
 
 
 def _load_dynamic_servers(*, strict: bool = False) -> dict:
@@ -212,19 +232,25 @@ def _normalise_server_config(cfg: dict) -> dict:
         expanded = os.path.expanduser(command)
         if not os.path.isabs(expanded):
             raise ValueError("stdio MCP command must be an absolute executable path")
-        command_path = os.path.realpath(expanded)
-        if not os.path.isfile(command_path) or not os.access(command_path, os.X_OK):
+        # Execute the caller-provided absolute path rather than its realpath.
+        # Python virtual-environment launchers are symlinks; resolving one to
+        # the base interpreter silently drops the venv and its MCP packages.
+        # Validate the resolved target, but preserve the explicit launcher.
+        command_path = os.path.abspath(expanded)
+        resolved_command = os.path.realpath(command_path)
+        if not os.path.isfile(resolved_command) or not os.access(resolved_command, os.X_OK):
             raise ValueError("stdio MCP command does not exist or is not executable")
 
         args = cfg.get("args") or []
         if not isinstance(args, list) or not all(isinstance(item, str) and "\x00" not in item for item in args):
             raise ValueError("stdio MCP args must be a JSON array of strings")
 
-        cwd_value = str(cfg.get("cwd") or WORKSPACE)
+        workspace = _workspace()
+        cwd_value = str(cfg.get("cwd") or workspace)
         cwd = os.path.realpath(os.path.expanduser(cwd_value))
         if not os.path.isdir(cwd):
             raise ValueError("stdio MCP cwd does not exist or is not a directory")
-        if not _inside(cwd, WORKSPACE):
+        if not _inside(cwd, workspace):
             raise ValueError("stdio MCP cwd must be inside the approved workspace")
 
         return {"transport": "stdio", "command": command_path, "args": args, "cwd": cwd}
@@ -275,7 +301,17 @@ async def _open_session(cfg: dict, *, extra_unlink_paths: tuple[str, ...] = ()):
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     _WORK_DIR.mkdir(parents=True, exist_ok=True)
-    profile = build_sandbox_profile(WORKSPACE, extra_unlink_paths=extra_unlink_paths)
+    workspace = _workspace()
+    try:
+        from aegis.context import current_context
+        strict_writes = current_context() is not None
+    except Exception:
+        strict_writes = False
+    profile = build_sandbox_profile(
+        workspace,
+        extra_unlink_paths=extra_unlink_paths,
+        strict_writes=strict_writes,
+    )
     with _SANDBOX_BACKEND.prepare(
         [cfg["command"], *cfg["args"]],
         profile=profile,
@@ -443,7 +479,7 @@ def mcp_add_server(
     else:
         if headers:
             return "[error] headers_json is only valid for HTTP MCP servers"
-        raw_cfg = {"transport": "stdio", "command": command, "args": args, "cwd": cwd or WORKSPACE}
+        raw_cfg = {"transport": "stdio", "command": command, "args": args, "cwd": cwd or _workspace()}
 
     try:
         cfg = _normalise_server_config(raw_cfg)

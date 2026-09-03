@@ -24,6 +24,14 @@ Do not commit `.venv/`, `logs/`, `workspace/`, `bin/tunnel-client`, or any
 
 ## Change expectations
 
+- Preserve AEGIS exact-pair authorization. Every effectful MCP tool must
+  validate the exact `session_id + working_envelope_id`, ACTIVE/expiry/revoked
+  state, and the least capability before entering its implementation. Never
+  introduce a global current workspace or an effectful legacy fallback.
+- Preserve the immutable canonical root, symlink/nearest-existing-parent
+  containment, protected internal state, strict subprocess write allow-list,
+  global unlink denial, per-envelope background-job/MCP ownership, and direct
+  file `expected_hash` concurrency check.
 - Keep MCP protocol traffic on stdout only; send all diagnostics to stderr
   or `logs/agent_activity.jsonl` via the existing `_logged` wrapper in
   `server.py`.
@@ -70,6 +78,11 @@ compile ล่าสุด
 
 ## สิ่งที่คาดหวังเมื่อแก้โค้ด
 
+- ต้องรักษาการ authorize ด้วยคู่ `session_id + working_envelope_id` ที่ตรงกัน
+  สำหรับทุก effectful tool รวมทั้ง ACTIVE/หมดอายุ/เพิกถอน/capability ห้ามเพิ่ม
+  global current workspace หรือ fallback ที่ข้าม AEGIS
+- ต้องรักษา immutable canonical root, symlink containment, internal state,
+  strict write allow-list, unlink denial, owner isolation และ `expected_hash`
 - ให้ MCP protocol traffic ใช้ stdout เท่านั้น ส่ง diagnostics ทั้งหมดไปที่
   stderr หรือ `logs/agent_activity.jsonl` ผ่าน wrapper `_logged` ที่มีอยู่
   แล้วใน `server.py`

@@ -21,12 +21,49 @@ def build_sandbox_profile(
     extra_write_paths: tuple[str, ...] = (),
     extra_read_paths: tuple[str, ...] = (),
     extra_unlink_paths: tuple[str, ...] = (),
+    strict_writes: bool = False,
 ) -> str:
     """Build the shared macOS sandbox profile used by guarded subprocess tools."""
+    def _quoted(path: str) -> str:
+        value = os.path.realpath(path).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{value}"'
+
     home = os.path.expanduser("~")
-    extra = "".join(f' (subpath "{os.path.realpath(p)}")' for p in extra_write_paths)
-    extra_read = "".join(f' (subpath "{os.path.realpath(p)}")' for p in extra_read_paths)
-    extra_unlink = "".join(f' (subpath "{os.path.realpath(p)}")' for p in extra_unlink_paths)
+    workspace_q = _quoted(workspace)
+    extra = "".join(f" (subpath {_quoted(p)})" for p in extra_write_paths)
+    extra_read = "".join(f" (subpath {_quoted(p)})" for p in extra_read_paths)
+    extra_unlink = "".join(f" (subpath {_quoted(p)})" for p in extra_unlink_paths)
+    try:
+        from config import INTERNAL_WORK_ROOT
+        internal_q = _quoted(INTERNAL_WORK_ROOT)
+    except Exception:
+        internal_q = '"/__aegis_internal_unavailable__"'
+
+    if strict_writes:
+        return f"""(version 1)
+(allow default)
+
+; AEGIS Working Envelope is a write allow-list, not a deny-list.
+(deny file-write*)
+(allow file-write* (subpath {workspace_q}) (subpath "/private/tmp"){extra})
+
+; Source files are never deleted. Guarded Git may receive a narrow metadata
+; unlink exception after this global denial.
+(deny file-write-unlink)
+{f'(allow file-write-unlink{extra_unlink})' if extra_unlink else ''}
+
+; Credentials, session history, and AEGIS state are never readable by a child.
+(deny file-read*
+  (subpath {_quoted(os.path.join(home, '.ssh'))})
+  (subpath {_quoted(os.path.join(home, '.aws'))})
+  (subpath {_quoted(os.path.join(home, '.gnupg'))})
+  (subpath {_quoted(os.path.join(home, '.claude'))})
+  (subpath {_quoted(os.path.join(home, '.config'))})
+  (subpath {internal_q})
+)
+(deny file-write* (subpath {internal_q}))
+(allow file-read* (subpath {workspace_q}){extra_read})
+"""
     return f"""(version 1)
 (allow default)
 
@@ -53,11 +90,11 @@ def build_sandbox_profile(
 )
 
 ; workspace + /tmp + explicit capability overrides
-(allow file-write* (subpath "{workspace}") (subpath "/private/tmp"){extra})
-(allow file-read*  (subpath "{workspace}"){extra_read})
+(allow file-write* (subpath {workspace_q}) (subpath "/private/tmp"){extra})
+(allow file-read*  (subpath {workspace_q}){extra_read})
 
 ; ordinary shell/Python callers may edit but never unlink workspace files
-(deny file-write-unlink (subpath "{workspace}"))
+(deny file-write-unlink (subpath {workspace_q}))
 
 ; narrowly scoped capabilities (currently Git metadata) may opt into unlink
 {f'(allow file-write-unlink{extra_unlink})' if extra_unlink else ''}

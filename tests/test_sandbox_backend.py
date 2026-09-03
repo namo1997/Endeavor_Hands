@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -74,7 +76,53 @@ class SandboxBackendTests(unittest.TestCase):
             extra_unlink_paths=("/tmp/workspace/repo/.git",),
         )
         self.assertIn('(deny file-write-unlink (subpath "/tmp/workspace"))', profile)
-        self.assertIn('(allow file-write-unlink (subpath "/private/tmp/workspace/repo/.git"))', profile)
+        expected_git_dir = os.path.realpath("/tmp/workspace/repo/.git")
+        self.assertIn(f'(allow file-write-unlink (subpath "{expected_git_dir}"))', profile)
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").exists(),
+        "requires the production macOS sandbox",
+    )
+    def test_strict_profile_functionally_contains_writes_and_unlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aegis-sandbox-") as base:
+            base_path = Path(base)
+            workspace = base_path / "workspace"
+            outside = base_path / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            protected = workspace / "keep.txt"
+            protected.write_text("keep", encoding="utf-8")
+            profile = build_sandbox_profile(str(workspace), strict_writes=True)
+            backend = RealSandboxBackend("/usr/bin/sandbox-exec")
+
+            allowed = backend.run(
+                ["/bin/bash", "-c", "printf allowed > inside.txt"],
+                profile=profile,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+            )
+            denied = backend.run(
+                ["/bin/bash", "-c", f"printf denied > {outside / 'escape.txt'}"],
+                profile=profile,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+            )
+            unlink = backend.run(
+                ["/bin/rm", str(protected)],
+                profile=profile,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual((workspace / "inside.txt").read_text(), "allowed")
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertFalse((outside / "escape.txt").exists())
+            self.assertNotEqual(unlink.returncode, 0)
+            self.assertTrue(protected.exists())
 
 
 if __name__ == "__main__":

@@ -31,6 +31,20 @@ Hands is an MCP stdio server. Protocol integrity is mandatory.
 - Keep model-facing schemas/descriptions stable or deliberately version/update tests/docs when changed.
 - Validate protocol/handshake behavior after server-facing changes.
 
+## 2A. AEGIS authorization boundary
+
+Every effectful public MCP tool must, before entering its implementation:
+
+1. select the exact `session_id + working_envelope_id` pair;
+2. verify ACTIVE state, expiry, revocation, and required capability;
+3. canonicalize any target path and reject symlink/ancestor escape;
+4. bind the immutable root through the request-local ContextVar;
+5. leave an allow/deny audit record without exposing IDs in ordinary logs.
+
+Never add an effectful legacy fallback, global current workspace, cross-session
+job/registry lookup, or alternate tool route around an AEGIS refusal. Direct
+existing-file mutation also requires `aegis_file_state`/`expected_hash`.
+
 ## 3. Filesystem permission gate
 
 The per-top-level-folder permission gate is an explicit user-consent boundary.
@@ -55,6 +69,8 @@ For filesystem/shell changes, verify:
 - protected system/credential paths remain blocked;
 - canonicalization resolves `..` and symlink aliases before policy decisions where applicable;
 - shell/Python writes remain within the intended sandbox/workspace policy;
+- AEGIS subprocess profiles deny all writes before allow-listing only the immutable root and `/private/tmp`;
+- source unlink remains globally denied, with only a selected Git metadata exception;
 - temporary/test paths are controlled;
 - errors do not expose secrets;
 - deletion/destructive filesystem commands remain refused where documented;
@@ -172,6 +188,12 @@ Standard deterministic regression suite:
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
+
+Authorization/security changes must also retain the focused AEGIS suites:
+
+```bash
+python3 -m unittest tests.test_aegis_core tests.test_aegis_server -v
 ```
 
 Run targeted tests first for the changed boundary, then the full suite before completion.
