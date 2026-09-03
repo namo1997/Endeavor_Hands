@@ -205,6 +205,14 @@ ChatGPT web needs a tunnel because it cannot connect to this Mac directly.
 This section is the full walkthrough end to end — for the Thai version see
 [docs/CHATGPT_SETUP_TH.md](docs/CHATGPT_SETUP_TH.md).
 
+This is the subscription route: ChatGPT remains the model/client, and this
+repository does not call the Responses API or require a model-inference API
+key. OpenAI's current developer-mode documentation lists Pro, Plus, Business,
+Enterprise, and Education accounts on the web as eligible and supports both
+read and write MCP tools. A restricted Platform runtime API key is still
+required below, but only to authenticate `tunnel-client` to the tunnel control
+plane.
+
 ### Part A — set up the tunnel (once)
 
 1. In [OpenAI Platform](https://platform.openai.com/), create a tunnel and
@@ -237,9 +245,9 @@ For every launch after this first one, use
 ### Part B — connect it inside ChatGPT
 
 1. Open **ChatGPT on the web** (not the desktop/mobile app) in the same
-   workspace the tunnel is associated with, and make sure **Developer mode**
-   is enabled for that workspace (Settings → look for a Developer mode
-   toggle; the exact label can shift as OpenAI rolls out UI changes).
+   workspace the tunnel is associated with, then enable **Developer mode** at
+   **Settings → Security and login → Developer mode**. Workspace policy may
+   still control whether the toggle is available.
 2. Go to **Settings → Apps & Connectors** (sometimes shown as **Plugins**
    depending on rollout) and click **+ Create** to start a new Developer-mode
    app/connector.
@@ -267,32 +275,6 @@ the `@mcp.tool()` docstrings in `server.py`), restart the tunnel (Part A steps
 keeps the tool list it discovered when it first connected, and won't pick up
 schema changes until you either start a new chat or hit **Refresh/Scan
 Tools** again in the app's settings.
-
-## Connect through the OpenAI Responses API
-
-If full write-capable MCP apps are not available in the current ChatGPT plan,
-the Responses API can call this server through the same Secure MCP Tunnel.
-This route is billed separately from a ChatGPT subscription.
-
-After Part A above is running, launch the included terminal client:
-
-```bash
-./scripts/start_api_chat.command
-```
-
-The launcher stores the Responses API key and Tunnel ID in separate macOS
-Keychain entries and exports them only to the local client process. The client
-uses `tunnel_id` directly in the Responses API MCP tool definition and requires
-an explicit terminal approval for every MCP call. It defaults to `gpt-5.6`;
-set `OPENAI_MODEL` for a different compatible model.
-
-The client uses stored Responses and `previous_response_id` for conversation
-continuity. Prompts, MCP arguments, and tool results needed by the model are
-therefore sent to and processed by OpenAI. Do not expose files or data that you
-do not intend to send to the API.
-
-See [docs/OPENAI_API_TUNNEL_TH.md](docs/OPENAI_API_TUNNEL_TH.md) for the complete
-Thai setup and AEGIS smoke-test walkthrough.
 
 ## One-click macOS launcher
 

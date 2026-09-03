@@ -17,6 +17,11 @@ ChatGPT Web
 
 Tunnel เป็นการเชื่อมต่อ HTTPS ขาออกจาก Mac ไปยัง OpenAI เท่านั้น จึงไม่ต้องเปิดพอร์ตจากอินเทอร์เน็ตเข้ามาใน Mac โดยตรง ดูรายละเอียดได้จาก [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
 
+เส้นทางนี้ใช้ ChatGPT Web เป็นตัวโมเดลและนับตามสิทธิ์/โควตาของ ChatGPT
+ตัว repo ไม่เรียก Responses API และไม่ต้องมี API key สำหรับ inference
+อย่างไรก็ตาม `tunnel-client` ยังต้องใช้ restricted runtime API key เพื่อ
+ยืนยันตัวตนกับ tunnel control plane เท่านั้น
+
 ## สิ่งที่ต้องมี
 
 1. Clone repo นี้ไว้ที่ไหนก็ได้บนเครื่อง แล้วติดตั้งตาม [README.md](../README.md) ให้เรียบร้อยก่อน
@@ -31,7 +36,7 @@ Tunnel เป็นการเชื่อมต่อ HTTPS ขาออกจ
 
 3. Platform organization ที่เป็นเจ้าของ tunnel และ ChatGPT workspace ที่จะใช้ ต้องถูก associate เข้าด้วยกัน และผู้สร้าง app ต้องมีสิทธิ์ **Tunnels: Read + Use**
 
-4. บัญชี/Workspace ChatGPT ต้องเปิดใช้ Developer mode สำหรับการสร้าง custom MCP app ได้
+4. บัญชี/Workspace ChatGPT ต้องเปิดใช้ Developer mode สำหรับการสร้าง custom MCP app ได้ เอกสาร OpenAI ปัจจุบันระบุว่ารองรับบัญชี Pro, Plus, Business, Enterprise และ Education บนเว็บ ทั้ง tool แบบอ่านและเขียน ทั้งนี้ policy ของ workspace อาจปิดความสามารถนี้ได้
 
 5. ใช้ ChatGPT **บนเว็บ** สำหรับการสร้างและใช้งาน Developer-mode app
 
@@ -70,7 +75,7 @@ http://127.0.0.1:8765/ui
 
 ## เพิ่ม Endeavor Hands เข้า ChatGPT
 
-1. เปิด ChatGPT Web ใน workspace เดียวกับที่ associate tunnel ไว้
+1. เปิด ChatGPT Web ใน workspace เดียวกับที่ associate tunnel ไว้ แล้วเปิด **Settings → Security and login → Developer mode**
 2. เข้า **Plugins** หรือ **Apps** (ชื่อหน้าจออาจต่างกันตามการ rollout)
 3. กดปุ่ม **+** เพื่อสร้าง Developer-mode app
 4. ในหัวข้อ **Connection** เลือก **Tunnel**
