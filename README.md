@@ -268,6 +268,32 @@ keeps the tool list it discovered when it first connected, and won't pick up
 schema changes until you either start a new chat or hit **Refresh/Scan
 Tools** again in the app's settings.
 
+## Connect through the OpenAI Responses API
+
+If full write-capable MCP apps are not available in the current ChatGPT plan,
+the Responses API can call this server through the same Secure MCP Tunnel.
+This route is billed separately from a ChatGPT subscription.
+
+After Part A above is running, launch the included terminal client:
+
+```bash
+./scripts/start_api_chat.command
+```
+
+The launcher stores the Responses API key and Tunnel ID in separate macOS
+Keychain entries and exports them only to the local client process. The client
+uses `tunnel_id` directly in the Responses API MCP tool definition and requires
+an explicit terminal approval for every MCP call. It defaults to `gpt-5.6`;
+set `OPENAI_MODEL` for a different compatible model.
+
+The client uses stored Responses and `previous_response_id` for conversation
+continuity. Prompts, MCP arguments, and tool results needed by the model are
+therefore sent to and processed by OpenAI. Do not expose files or data that you
+do not intend to send to the API.
+
+See [docs/OPENAI_API_TUNNEL_TH.md](docs/OPENAI_API_TUNNEL_TH.md) for the complete
+Thai setup and AEGIS smoke-test walkthrough.
+
 ## One-click macOS launcher
 
 After the one-time setup above, use

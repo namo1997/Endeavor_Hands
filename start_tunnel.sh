@@ -48,7 +48,7 @@ export CONTROL_PLANE_API_KEY
 "$TUNNEL_CLIENT" doctor --profile "$PROFILE_NAME" --explain
 umask 077
 mkdir -p "$LOG_DIR"
-print "Tunnel is ready. Keep this Terminal open while using the ChatGPT app."
+print "Tunnel is ready. Keep this Terminal open while using OpenAI API or ChatGPT."
 print "Structured tunnel log: $LOG_FILE"
 exec "$TUNNEL_CLIENT" run --profile "$PROFILE_NAME" --mcp.connection-max-ttl 168h0m0s \
   --log.format json \
