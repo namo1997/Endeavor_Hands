@@ -275,6 +275,7 @@ def _git_profile(
     mutate: bool,
     push_transport: str | None = None,
 ) -> str:
+    from aegis.context import current_context
     extra_reads: list[str] = []
     allowed_execs = [_GIT_BIN]
     if push_transport:
@@ -296,6 +297,7 @@ def _git_profile(
         workspace,
         extra_read_paths=tuple(extra_reads),
         extra_unlink_paths=(git_dir,) if mutate else (),
+        strict_writes=current_context() is not None,
     )
     exec_rules = " ".join(f'(literal "{path}")' for path in dict.fromkeys(allowed_execs))
     return profile + f"\n; Guarded Git may not execute repository-controlled helpers/shell commands.\n(deny process-exec)\n(allow process-exec {exec_rules})\n"
@@ -355,7 +357,8 @@ def _git_impl(
     timeout: int = 60,
 ) -> str:
     """Guarded Git operations with repository-scoped metadata mutation."""
-    from config import WORKSPACE
+    from config import get_workspace
+    workspace = get_workspace()
 
     action = (action or "").strip().lower()
     if action not in _ALLOWED_ACTIONS:
@@ -364,20 +367,20 @@ def _git_impl(
         return "[error] timeout must be between 1 and 300 seconds"
 
     try:
-        repo_root, git_dir = _resolve_repo(repo, WORKSPACE)
+        repo_root, git_dir = _resolve_repo(repo, workspace)
         normalized_paths = _normalize_paths(paths, repo_root)
 
         if action == "status":
             if normalized_paths or message or branch:
                 return "[error] status does not accept paths, message, or branch"
             result = _run_guarded_git(
-                WORKSPACE,
+                workspace,
                 repo_root,
                 git_dir,
                 ["-c", "core.fsmonitor=false", "status", "--short", "--branch"],
                 timeout=timeout,
             )
-            return _format_result(result, WORKSPACE)
+            return _format_result(result, workspace)
 
         if action == "diff":
             args = ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all"]
@@ -385,22 +388,22 @@ def _git_impl(
                 args.append("--cached")
             if normalized_paths:
                 args.extend(["--", *normalized_paths])
-            result = _run_guarded_git(WORKSPACE, repo_root, git_dir, args, timeout=timeout)
-            return _format_result(result, WORKSPACE)
+            result = _run_guarded_git(workspace, repo_root, git_dir, args, timeout=timeout)
+            return _format_result(result, workspace)
 
         if action == "add":
             if not normalized_paths:
                 return "[error] add requires explicit paths; staging the whole repository implicitly is not allowed"
             recovered = _recover_stale_index_lock(repo_root, git_dir)
             result = _run_guarded_git(
-                WORKSPACE,
+                workspace,
                 repo_root,
                 git_dir,
                 ["-c", "core.hooksPath=/dev/null", "add", "--", *normalized_paths],
                 timeout=timeout,
                 mutate=True,
             )
-            output = _format_result(result, WORKSPACE)
+            output = _format_result(result, workspace)
             if recovered:
                 output = f"[git] moved stale index lock to {recovered}\n{output}"
             return output
@@ -415,14 +418,14 @@ def _git_impl(
                 return "[error] commit does not accept paths; stage explicit paths with action=add first"
             recovered = _recover_stale_index_lock(repo_root, git_dir)
             result = _run_guarded_git(
-                WORKSPACE,
+                workspace,
                 repo_root,
                 git_dir,
                 ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "commit", "-m", commit_message],
                 timeout=timeout,
                 mutate=True,
             )
-            output = _format_result(result, WORKSPACE)
+            output = _format_result(result, workspace)
             if recovered:
                 output = f"[git] moved stale index lock to {recovered}\n{output}"
             return output
@@ -447,7 +450,7 @@ def _git_impl(
 
         push_env = _https_keychain_auth_env(remote_url) if transport == "https" else None
         result = _run_guarded_git(
-            WORKSPACE,
+            workspace,
             repo_root,
             git_dir,
             ["-c", "core.hooksPath=/dev/null", "push", remote_name, branch_name],
@@ -456,7 +459,7 @@ def _git_impl(
             push_transport=transport,
             extra_env=push_env,
         )
-        output = _format_result(result, WORKSPACE)
+        output = _format_result(result, workspace)
         if result.returncode == 0:
             output = f"[git] pushed {branch_name} to {remote_name}\n{output}"
         return output

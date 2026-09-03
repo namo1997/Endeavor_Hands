@@ -14,7 +14,7 @@ workspace/
 work/
 
 # Project-local virtual environment (created by install_library/install.sh)
-.venv/
+.venv*/
 
 # Downloaded local executable
 bin/

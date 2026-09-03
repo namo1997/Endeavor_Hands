@@ -56,8 +56,24 @@ def _registry_path() -> Path:
 
 
 def _legacy_registry_path() -> Path:
-    from config import WORKSPACE
-    return Path(WORKSPACE) / "bash_jobs.json"
+    from config import get_workspace
+    return Path(get_workspace()) / "bash_jobs.json"
+
+
+def _identity() -> tuple[str, str]:
+    try:
+        from aegis.context import current_identity
+        value = current_identity()
+    except Exception:
+        value = None
+    return value or ("legacy", "legacy")
+
+
+def _owned(job: dict, identity: tuple[str, str]) -> bool:
+    return (
+        job.get("session_id", "legacy") == identity[0]
+        and job.get("working_envelope_id", "legacy") == identity[1]
+    )
 
 
 def _now_iso() -> str:
@@ -200,7 +216,10 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
             Diagnostic("tool_validation", "tool", False),
         )
 
-    from config import WORKSPACE
+    from aegis.context import current_context
+    from config import get_workspace
+    workspace = get_workspace()
+    identity = _identity()
     reg = _Registry()
 
     if action == "list":
@@ -208,6 +227,7 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
             jobs = reg.mutate(lambda js: [_refresh_status(j) for j in js])
         except Exception as exc:
             return f"[error] background job registry unavailable: {exc}"
+        jobs = [job for job in jobs if _owned(job, identity)]
         if not jobs:
             return "(no background jobs)"
         lines = [f"{j['id']} [{j['status']}] {j['command'][:60]} (started {j['started_at']})" for j in jobs]
@@ -231,7 +251,9 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
             job_id = uuid.uuid4().hex[:8]
             _WORK_DIR.mkdir(parents=True, exist_ok=True)
             log_path = str(_WORK_DIR / f"_bash_bg_{job_id}.log")
-            profile = build_sandbox_profile(WORKSPACE)
+            profile = build_sandbox_profile(
+                workspace, strict_writes=current_context() is not None
+            )
             profile_path: str | None = None
             try:
                 with open(log_path, "w", encoding="utf-8") as logf:
@@ -240,7 +262,7 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
                         profile=profile,
                         profile_dir=_WORK_DIR,
                         stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                        cwd=WORKSPACE,
+                        cwd=workspace,
                     )
                     proc = spawned_job.process
                     profile_path = spawned_job.profile_path
@@ -257,6 +279,8 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
                 "log": log_path, "status": "running", "exit_code": None,
                 "started_at": _now_iso(), "ended_at": None,
                 "start_sig": _ps_lstart(proc.pid),
+                "session_id": identity[0],
+                "working_envelope_id": identity[1],
             }
             jobs.append(job)
             return job
@@ -300,7 +324,7 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
         jobs = reg.mutate(lambda js: [_refresh_status(j) for j in js])
     except Exception as exc:
         return f"[error] background job registry unavailable: {exc}"
-    job = next((j for j in jobs if j["id"] == job_id), None)
+    job = next((j for j in jobs if j["id"] == job_id and _owned(j, identity)), None)
     if job is None:
         return append_diagnostic(
             f"[error] unknown job_id: {job_id} — check bash_bg(action='list')",
@@ -350,3 +374,77 @@ def bash_bg(action: str, command: str = "", job_id: str = "") -> str:
         return f"[error] job {job_id} stopped but registry update failed: {exc}"
     _cleanup_profile(job_id)
     return f"job {job_id} killed"
+
+
+def kill_envelope_jobs(session_id: str, working_envelope_id: str) -> int:
+    """Terminate only processes owned by the exact revoked AEGIS pair."""
+    identity = (session_id, working_envelope_id)
+    reg = _Registry()
+    candidates: list[dict] = []
+
+    def _collect(jobs: list[dict]) -> list[dict]:
+        for job in jobs:
+            _refresh_status(job)
+            if not _owned(job, identity) or job.get("status") != "running":
+                continue
+            candidates.append(dict(job))
+        return jobs
+
+    try:
+        reg.mutate(_collect)
+    except Exception:
+        return 0
+
+    # Signal every owned process first, then share one bounded grace window.
+    # Never wait while holding the registry lock.
+    for job in candidates:
+        try:
+            os.kill(job["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+
+    deadline = time.monotonic() + _KILL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if all(not _same_process(job) for job in candidates):
+            break
+        time.sleep(0.05)
+
+    for job in candidates:
+        if _same_process(job):
+            try:
+                os.kill(job["pid"], signal.SIGKILL)
+            except OSError:
+                pass
+        proc = _PROCS.get(job["id"])
+        if proc is not None:
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+
+    candidate_ids = {job["id"] for job in candidates}
+
+    def _mark_revoked(jobs: list[dict]) -> list[dict]:
+        for job in jobs:
+            if job.get("id") in candidate_ids and _owned(job, identity):
+                job["status"] = "revoked"
+                job["ended_at"] = _now_iso()
+        return jobs
+
+    try:
+        reg.mutate(_mark_revoked)
+    except Exception:
+        pass
+    for job_id in candidate_ids:
+        _PROCS.pop(job_id, None)
+        _cleanup_profile(job_id)
+    return len(candidates)
+
+
+def _same_process(job: dict) -> bool:
+    """Return true only while the recorded job still owns this PID."""
+    proc = _PROCS.get(job["id"])
+    if proc is not None:
+        return proc.poll() is None
+    signature = job.get("start_sig")
+    return bool(signature and _ps_lstart(job["pid"]) == signature)

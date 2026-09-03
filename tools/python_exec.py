@@ -60,7 +60,10 @@ def _classify_error(stderr: str) -> str | None:
 
 
 def _python_exec_impl(code: str, timeout: int = _TIMEOUT_DEFAULT, max_chars: int = _MAX_CHARS_DEFAULT) -> str:
-    from config import WORKSPACE
+    from aegis.context import current_context
+    from config import get_workspace
+    workspace = get_workspace()
+    aegis_bound = current_context() is not None
     if not code or not code.strip():
         return append_diagnostic(
             "[error] code is required",
@@ -68,10 +71,14 @@ def _python_exec_impl(code: str, timeout: int = _TIMEOUT_DEFAULT, max_chars: int
         )
     script = None
     try:
-        Path(WORKSPACE).mkdir(parents=True, exist_ok=True)
-        script = Path(WORKSPACE) / f"._exec_{uuid.uuid4().hex[:8]}.py"
+        Path(workspace).mkdir(parents=True, exist_ok=True)
+        script = Path(workspace) / f"._exec_{uuid.uuid4().hex[:8]}.py"
         # OS-level sandbox เหมือน bash — เขียนได้เฉพาะ workspace + /tmp + skills/ (audit P1)
-        profile = build_sandbox_profile(WORKSPACE, extra_write_paths=(_SKILLS_DIR,))
+        profile = build_sandbox_profile(
+            workspace,
+            extra_write_paths=() if aegis_bound else (_SKILLS_DIR,),
+            strict_writes=aegis_bound,
+        )
         _progress("running code…")
         script.write_text(code, encoding="utf-8")
         try:
@@ -85,7 +92,7 @@ def _python_exec_impl(code: str, timeout: int = _TIMEOUT_DEFAULT, max_chars: int
                     [sys.executable, "-u", str(script)],
                     profile=profile,
                     capture_output=True, text=True,
-                    timeout=timeout, cwd=WORKSPACE, stdin=subprocess.DEVNULL,
+                    timeout=timeout, cwd=workspace, stdin=subprocess.DEVNULL,
                 )
             except subprocess.TimeoutExpired as e:
                 # e.stdout/e.stderr come back as bytes here even with text=True (subprocess
@@ -105,7 +112,7 @@ def _python_exec_impl(code: str, timeout: int = _TIMEOUT_DEFAULT, max_chars: int
                 )
                 if partial:
                     note += " — partial output before timeout:"
-                    partial = truncate_with_save(partial, max_chars, WORKSPACE, "python_exec",
+                    partial = truncate_with_save(partial, max_chars, workspace, "python_exec",
                                                   file_prefix="_exec_output",
                                                   marker_first=True, keep_tail=True)
                     return f"{note}\n{partial}"
@@ -122,7 +129,7 @@ def _python_exec_impl(code: str, timeout: int = _TIMEOUT_DEFAULT, max_chars: int
             if hint:
                 out += f"\n[hint] {hint}"
         diagnostic = classify_process_failure(
-            proc.returncode, proc.stderr or "", workspace=WORKSPACE,
+            proc.returncode, proc.stderr or "", workspace=workspace,
         )
         if proc.returncode != 0 and not out.strip():
             return append_diagnostic(
@@ -136,7 +143,7 @@ def _python_exec_impl(code: str, timeout: int = _TIMEOUT_DEFAULT, max_chars: int
         # section (and its BAD/GOOD example) documents head-only behavior specifically for
         # that case, and this must not silently diverge from what it teaches.
         out = truncate_with_save(
-            out, max_chars, WORKSPACE, "python_exec",
+            out, max_chars, workspace, "python_exec",
             file_prefix="_exec_output",
             keep_tail=bool(proc.returncode != 0 or proc.stderr),
             extra_note=(

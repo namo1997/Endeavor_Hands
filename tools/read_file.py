@@ -12,7 +12,7 @@ from config import (
     READ_FILE_MAX_CHARS as _MAX_CHARS,
     READ_FILE_MAX_BYTES as _MAX_FILE_BYTES,
     READ_FILE_AUDIO_VIDEO_MAX_BYTES as _MAX_AV_BYTES,
-    WORKSPACE,
+    get_workspace,
 )
 from tools._transcribe import _AUDIO_EXT, _VIDEO_EXT
 _CODE_EXT = {".py", ".js", ".ts", ".go", ".java", ".cpp", ".c", ".rs", ".rb", ".php", ".swift", ".kt"}
@@ -480,7 +480,7 @@ def _transcribe_to_state(p: Path, path: str, user_query: str = "") -> str:
     filename = f"transcript_{safe_stem}_{uuid.uuid4().hex[:8]}.md"
     saved_path = ""
     try:
-        out_path = Path(WORKSPACE) / filename
+        out_path = Path(get_workspace()) / filename
         out_path.write_text(raw, encoding="utf-8")
         saved_path = str(out_path)
     except Exception as e:

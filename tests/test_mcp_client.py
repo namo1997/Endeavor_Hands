@@ -209,7 +209,7 @@ class MCPClientTests(unittest.TestCase):
                 "cwd": str(self.workspace),
             }
         )
-        self.assertEqual(cfg["command"], os.path.realpath(sys.executable))
+        self.assertEqual(cfg["command"], os.path.abspath(sys.executable))
         self.assertEqual(cfg["args"][1], "print('x; touch should-not-run')")
 
 

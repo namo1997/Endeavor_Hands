@@ -17,6 +17,11 @@ ChatGPT Web
 
 Tunnel เป็นการเชื่อมต่อ HTTPS ขาออกจาก Mac ไปยัง OpenAI เท่านั้น จึงไม่ต้องเปิดพอร์ตจากอินเทอร์เน็ตเข้ามาใน Mac โดยตรง ดูรายละเอียดได้จาก [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
 
+เส้นทางนี้ใช้ ChatGPT Web เป็นตัวโมเดลและนับตามสิทธิ์/โควตาของ ChatGPT
+ตัว repo ไม่เรียก Responses API และไม่ต้องมี API key สำหรับ inference
+อย่างไรก็ตาม `tunnel-client` ยังต้องใช้ restricted runtime API key เพื่อ
+ยืนยันตัวตนกับ tunnel control plane เท่านั้น
+
 ## สิ่งที่ต้องมี
 
 1. Clone repo นี้ไว้ที่ไหนก็ได้บนเครื่อง แล้วติดตั้งตาม [README.md](../README.md) ให้เรียบร้อยก่อน
@@ -31,7 +36,7 @@ Tunnel เป็นการเชื่อมต่อ HTTPS ขาออกจ
 
 3. Platform organization ที่เป็นเจ้าของ tunnel และ ChatGPT workspace ที่จะใช้ ต้องถูก associate เข้าด้วยกัน และผู้สร้าง app ต้องมีสิทธิ์ **Tunnels: Read + Use**
 
-4. บัญชี/Workspace ChatGPT ต้องเปิดใช้ Developer mode สำหรับการสร้าง custom MCP app ได้
+4. บัญชี/Workspace ChatGPT ต้องเปิดใช้ Developer mode สำหรับการสร้าง custom MCP app ได้ เอกสาร OpenAI ปัจจุบันระบุว่ารองรับบัญชี Pro, Plus, Business, Enterprise และ Education บนเว็บ ทั้ง tool แบบอ่านและเขียน ทั้งนี้ policy ของ workspace อาจปิดความสามารถนี้ได้
 
 5. ใช้ ChatGPT **บนเว็บ** สำหรับการสร้างและใช้งาน Developer-mode app
 
@@ -70,7 +75,7 @@ http://127.0.0.1:8765/ui
 
 ## เพิ่ม Endeavor Hands เข้า ChatGPT
 
-1. เปิด ChatGPT Web ใน workspace เดียวกับที่ associate tunnel ไว้
+1. เปิด ChatGPT Web ใน workspace เดียวกับที่ associate tunnel ไว้ แล้วเปิด **Settings → Security and login → Developer mode**
 2. เข้า **Plugins** หรือ **Apps** (ชื่อหน้าจออาจต่างกันตามการ rollout)
 3. กดปุ่ม **+** เพื่อสร้าง Developer-mode app
 4. ในหัวข้อ **Connection** เลือก **Tunnel**
@@ -85,11 +90,13 @@ http://127.0.0.1:8765/ui
 
 ## Tools ที่ ChatGPT เห็นในปัจจุบัน
 
-ปัจจุบัน schema มี 11 tools:
+ปัจจุบัน schema มี 16 tools:
 
 | งาน | Tool |
 |---|---|
-| รันคำสั่งสั้น, ค้นหา, Git, test, build | `bash` |
+| สร้าง/ตรวจ/เพิกถอน Working Envelope และอ่าน hash ไฟล์ | `aegis_start_session`, `aegis_status`, `aegis_file_state`, `aegis_revoke` |
+| รันคำสั่งสั้น, ค้นหา, test, build | `bash` |
+| Git แบบ guarded | `git` |
 | รันงาน shell แบบ background | `bash_bg` |
 | รัน Python สำหรับวิเคราะห์หรือ test | `python_exec` |
 | อ่านโค้ด, เอกสาร, เสียง/วิดีโอ และภาพ | `read_file` |
@@ -97,6 +104,12 @@ http://127.0.0.1:8765/ui
 | แก้ไฟล์เดิมเฉพาะจุด | `edit` |
 | ดู/ควบคุมแอปบน Mac | `computer` |
 | เชื่อมต่อ MCP server อื่น | `mcp_list_tools`, `mcp_call_tool`, `mcp_add_server`, `mcp_remove_server` |
+
+ก่อนใช้ tool ที่มีผลต่อเครื่อง ให้ผู้ใช้อนุญาต root ของงานในบทสนทนาก่อน
+แล้วเรียก `aegis_start_session` จากนั้นส่ง `session_id` และ
+`working_envelope_id` ที่ได้ให้ทุก effectful tool ในแชตนั้น ห้ามนำ ID
+จากคนละแชตมาปนกัน ก่อนแก้หรือแทนที่ไฟล์เดิมต้องเรียก `aegis_file_state`
+และส่ง `sha256` กลับมาเป็น `expected_hash` เมื่อจบงานให้เรียก `aegis_revoke`
 
 ### การอ่านภาพ
 

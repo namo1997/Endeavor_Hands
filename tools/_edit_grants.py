@@ -27,8 +27,20 @@ from __future__ import annotations
 import os
 import secrets
 
-_GRANTED: set[str] = set()
-_PENDING: dict[str, str] = {}
+_GRANTED: set[tuple[str, str, str]] = set()
+_PENDING: dict[tuple[str, str, str], str] = {}
+
+
+def _scope_key(unit: str) -> tuple[str, str, str]:
+    """Bind consent to the exact AEGIS pair, never just a filesystem path."""
+    try:
+        from aegis.context import current_identity
+        identity = current_identity()
+    except Exception:
+        identity = None
+    if identity is None:
+        return "legacy", "legacy", unit
+    return identity[0], identity[1], unit
 
 
 def _folder_unit(effective_path: str) -> str:
@@ -36,13 +48,15 @@ def _folder_unit(effective_path: str) -> str:
     under (matches how a person names "folder X on the Desktop"), or the
     file's own containing directory when the path is outside WORKSPACE
     entirely (no natural top-level anchor to walk up to there)."""
-    from config import WORKSPACE
+    from config import get_workspace
     abs_path = os.path.realpath(effective_path)
-    ws_abs = os.path.realpath(WORKSPACE)
+    ws_abs = os.path.realpath(get_workspace())
     if abs_path == ws_abs:
         return ws_abs
     if abs_path.startswith(ws_abs + os.sep):
         rest = abs_path[len(ws_abs) + 1:]
+        if os.sep not in rest:
+            return ws_abs
         first = rest.split(os.sep, 1)[0]
         return os.path.join(ws_abs, first)
     return os.path.dirname(abs_path)
@@ -52,21 +66,22 @@ def check_grant(effective_path: str, grant_phrase: str) -> str | None:
     """Returns an error string (and registers/validates grant_phrase) if the
     covering folder isn't granted yet; None once it's safe to edit."""
     unit = _folder_unit(effective_path)
-    if unit in _GRANTED:
+    scope = _scope_key(unit)
+    if scope in _GRANTED:
         return None
-    expected = _PENDING.get(unit)
+    expected = _PENDING.get(scope)
     if expected and grant_phrase.strip() == expected:
-        _GRANTED.add(unit)
-        del _PENDING[unit]
+        _GRANTED.add(scope)
+        del _PENDING[scope]
         return None
     # The nonce must stay stable across repeated failed attempts (a wrong
     # guess, an unrelated call on a sibling file, a mistyped retry) — rotating
     # it on every failure would invalidate the very nonce just handed out in
     # the previous response before it could ever be echoed back correctly.
     # Only actually granting (above) retires a nonce.
-    if unit not in _PENDING:
-        _PENDING[unit] = secrets.token_hex(4)
-    nonce = _PENDING[unit]
+    if scope not in _PENDING:
+        _PENDING[scope] = secrets.token_hex(4)
+    nonce = _PENDING[scope]
     return (
         f'[permission_required] edit needs the user\'s explicit permission before this or any '
         f'other file under \'{unit}\' can be edited this session. Ask the user directly, in this '

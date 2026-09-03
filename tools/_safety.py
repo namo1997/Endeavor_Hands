@@ -56,7 +56,12 @@ def _strip_ws_prefix(path: str, workspace: str) -> str:
 
 def _protected_hit(abs_path: str) -> str | None:
     """abs_path ต้องผ่าน realpath มาแล้ว — คืนชื่อ protected path ที่โดน, None ถ้าไม่โดน"""
-    for protected in _PROTECTED_PATHS:
+    try:
+        from config import AEGIS_DATA_ROOT, INTERNAL_WORK_ROOT
+        protected_paths = [*_PROTECTED_PATHS, INTERNAL_WORK_ROOT, AEGIS_DATA_ROOT]
+    except Exception:
+        protected_paths = _PROTECTED_PATHS
+    for protected in protected_paths:
         real_protected = os.path.realpath(protected)
         if abs_path == real_protected or abs_path.startswith(real_protected + os.sep):
             return protected
@@ -78,8 +83,8 @@ def is_edited_copy(path: str) -> bool:
 
 
 def _in_workspace(abs_path: str) -> bool:
-    from config import WORKSPACE
-    ws_abs = os.path.realpath(WORKSPACE)
+    from config import get_workspace
+    ws_abs = os.path.realpath(get_workspace())
     return abs_path == ws_abs or abs_path.startswith(ws_abs + os.sep)
 
 
@@ -93,7 +98,16 @@ def check_path(path: str) -> str | None:
     hit = _protected_hit(abs_path)
     if hit:
         return f"[BLOCKED] protected path: {hit}"
-    if os.getenv("V2_ALLOW_OUTSIDE") or _in_workspace(abs_path):
+    try:
+        from aegis.context import current_context
+        aegis_bound = current_context() is not None
+    except Exception:
+        aegis_bound = False
+    if _in_workspace(abs_path):
+        return None
+    if aegis_bound:
+        return f"[AEGIS:PATH_OUTSIDE_ENVELOPE] write escapes immutable working root: {abs_path}"
+    if os.getenv("V2_ALLOW_OUTSIDE"):
         return None
     if not os.path.exists(abs_path) or is_edited_copy(abs_path):
         return None
@@ -115,7 +129,20 @@ def plan_write(path: str) -> tuple[str, str | None, str | None]:
     hit = _protected_hit(abs_path)
     if hit:
         return resolved, f"[BLOCKED] protected path: {hit}", None
-    if os.getenv("V2_ALLOW_OUTSIDE") or _in_workspace(abs_path):
+    try:
+        from aegis.context import current_context
+        aegis_bound = current_context() is not None
+    except Exception:
+        aegis_bound = False
+    if _in_workspace(abs_path):
+        return resolved, None, None
+    if aegis_bound:
+        return (
+            resolved,
+            f"[AEGIS:PATH_OUTSIDE_ENVELOPE] write escapes immutable working root: {abs_path}",
+            None,
+        )
+    if os.getenv("V2_ALLOW_OUTSIDE"):
         return resolved, None, None
     if not os.path.exists(abs_path) or is_edited_copy(abs_path):
         return resolved, None, None
@@ -132,21 +159,23 @@ def plan_write(path: str) -> tuple[str, str | None, str | None]:
 
 def resolve_path(path: str) -> str:
     """Resolve WRITE path: absolute → as-is (check_path guards), relative → WORKSPACE/path"""
-    from config import WORKSPACE
+    from config import get_workspace
+    workspace = get_workspace()
     p = os.path.expanduser(path)
     if os.path.isabs(p):
         return p
-    return os.path.join(WORKSPACE, _strip_ws_prefix(p, WORKSPACE))
+    return os.path.join(workspace, _strip_ws_prefix(p, workspace))
 
 
 def resolve_read_path(path: str) -> str:
     """Resolve READ path: reads unrestricted except system paths; relative → WORKSPACE/path
     realpath + _protected_hit on BOTH branches — relative `../` traversal (e.g. ../../etc/passwd)
     must hit the same protected-path guard as an absolute /etc/passwd."""
-    from config import WORKSPACE
+    from config import get_workspace
+    workspace = get_workspace()
     p = os.path.expanduser(path)
     if not os.path.isabs(p):
-        p = os.path.join(WORKSPACE, _strip_ws_prefix(p, WORKSPACE))
+        p = os.path.join(workspace, _strip_ws_prefix(p, workspace))
     hit = _protected_hit(os.path.realpath(p))
     if hit:
         raise PermissionError(f"[BLOCKED] protected path: {hit}")
@@ -167,13 +196,14 @@ def find_readable(path: str) -> str | None:
     existing file, else None (never raises for a plain not-found — a
     PermissionError from a protected path still propagates, since that's a
     policy violation, not a location guess)."""
-    from config import WORKSPACE
+    from config import get_workspace
+    workspace = get_workspace()
     primary = resolve_read_path(path)
     if os.path.isfile(primary):
         return primary
     if not os.path.isabs(os.path.expanduser(path)):
-        ws_name = os.path.basename(WORKSPACE.rstrip("/\\"))
-        fallback = os.path.join(WORKSPACE, ws_name, _strip_ws_prefix(path, WORKSPACE))
+        ws_name = os.path.basename(workspace.rstrip("/\\"))
+        fallback = os.path.join(workspace, ws_name, _strip_ws_prefix(path, workspace))
         if os.path.isfile(fallback):
             # audit F6: unlike the primary branch above (resolve_read_path,
             # which realpath+_protected_hit-checks everything), this fallback
@@ -190,7 +220,7 @@ def find_readable(path: str) -> str | None:
             hit = _protected_hit(real_fallback)
             if hit:
                 raise PermissionError(f"[BLOCKED] protected path: {hit}")
-            ws_abs = os.path.realpath(WORKSPACE)
+            ws_abs = os.path.realpath(workspace)
             if real_fallback == ws_abs or real_fallback.startswith(ws_abs + os.sep):
                 return fallback
     return None

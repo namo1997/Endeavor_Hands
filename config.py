@@ -9,8 +9,33 @@ from __future__ import annotations
 import os
 
 # ── Workspace ─────────────────────────────────────────────────────────────
-WORKSPACE = os.getenv("V2_WORKSPACE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace"))
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE = os.getenv("V2_WORKSPACE", os.path.join(PROJECT_ROOT, "workspace"))
 os.makedirs(WORKSPACE, exist_ok=True)
+
+
+def get_workspace() -> str:
+    """Return the request-local AEGIS root, or the legacy default workspace.
+
+    The lazy import avoids making configuration depend on AEGIS during early
+    interpreter startup and keeps existing unit-test overrides of WORKSPACE
+    working when no envelope is bound.
+    """
+    try:
+        from aegis.context import current_root
+        bound = current_root()
+    except Exception:
+        bound = None
+    return bound or WORKSPACE
+
+
+# AEGIS authorization/audit state is an internal-operation area.  It is never
+# part of a GPT mutation surface, even when the chosen envelope is an ancestor
+# of this directory.
+INTERNAL_WORK_ROOT = os.path.realpath(os.path.join(PROJECT_ROOT, "work"))
+AEGIS_DATA_ROOT = os.path.realpath(
+    os.path.expanduser(os.getenv("AEGIS_DATA_ROOT", os.path.join(INTERNAL_WORK_ROOT, "aegis")))
+)
 
 # ── read_file limits ──────────────────────────────────────────────────────
 READ_FILE_MAX_CHARS = int(os.getenv("V2_READ_FILE_MAX_CHARS", "10000"))

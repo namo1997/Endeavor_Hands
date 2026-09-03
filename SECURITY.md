@@ -25,15 +25,27 @@ privately, and coordinate disclosure after a fix is available.
   connection this Mac makes out to OpenAI; nothing needs to be exposed on an
   inbound port. The MCP server itself talks stdio only, to the local
   `tunnel-client` process — it does not listen on any network port.
-- **File scope defaults to `~/Desktop`** (`V2_WORKSPACE`). Files can be read,
-  created, and edited there. A curated list of protected paths (SSH/AWS/GPG
-  keys, Keychain, browser/app credential stores, this repo's own runtime
-  token) is refused regardless of `V2_WORKSPACE`.
-- **File deletion is disabled everywhere.** `bash`/`python_exec` refuse
-  `rm`/`unlink`-class operations, and `computer` refuses UI actions that
-  read as delete/remove. This is enforced in code, not left to the model's
-  judgment.
-- **Existing-file modification needs a session grant.** The first `edit`
+- **Every effectful call requires an AEGIS Working Envelope.** The exact
+  high-entropy `session_id + working_envelope_id` pair selects an immutable
+  canonical root, capability set, ACTIVE state, expiry, and revocation state.
+  The request-local binding is a `ContextVar`, not a process-global current
+  workspace. Cross-session identifier, grant, process, and mutation authority
+  is denied.
+- **Canonical paths are contained in the immutable root.** Existing symlinks
+  and the nearest existing ancestor of a new path are resolved before the
+  decision. `/`, the whole home directory, system roots, credential paths, and
+  Endeavor/AEGIS internal state are not mutation roots or targets.
+- **Shell/Python use a strict write allow-list.** An AEGIS-bound
+  `sandbox-exec` profile denies every filesystem write before allowing only
+  the immutable root and `/private/tmp`. It denies unlink globally. Guarded
+  Git can receive a narrow unlink exception for its selected `.git` metadata,
+  never source files. This covers shell redirection and child processes rather
+  than relying on command-text keyword matching.
+- **Direct existing-file writes use optimistic concurrency.** `edit` and
+  `write_file(overwrite=true)` require the SHA-256 returned by
+  `aegis_file_state`. A stale value returns
+  `CONCURRENT_MODIFICATION_DETECTED` before replacement.
+- **Existing-file modification also retains a conversation consent gate.** The first `edit`
   call, or `write_file` with `overwrite=true` on a file that already
   exists, targeting a given top-level workspace folder fails with
   `[permission_required]` and a one-time nonce until the user explicitly
@@ -41,27 +53,39 @@ privately, and coordinate disclosure after a fix is available.
   (`tools/_edit_grants.py`). This is a workflow gate reinforced by the
   model's own instructions, not a cryptographic guarantee — treat it as
   friction against an accidental or careless edit, not as a hard boundary
-  against a model that has been deliberately jailbroken.
+  against a model that has been deliberately jailbroken. Pending/granted
+  nonces are scoped to the exact AEGIS pair.
+- **Background jobs and nested MCP registrations are owner-isolated.** Jobs
+  can only be listed/polled/killed by their exact envelope pair and are stopped
+  on revocation. Dynamic MCP registrations are stored per envelope in
+  protected internal state; local stdio servers use direct argv and the same
+  strict sandbox.
 - **`computer` requires macOS Accessibility permission** and refuses to
   interact with password/secure-text fields. It also refuses actions whose
   target text reads as delete/remove-related, independent of the
   file-deletion guard above.
-- **Outside `~/Desktop`, existing files are never modified in place.**
-  `edit`/`write_file` redirect to a sibling `name.edited.ext` working copy;
-  the original is untouched.
-- **`bash`/`bash_bg`/`python_exec` run inside a sandbox profile** scoped to
-  the workspace directory, and are explicitly *not* covered by the
-  `edit`/`write_file` permission gate above — a model could still write
-  files via shell redirection without triggering that gate. This is a known,
-  accepted trade-off (narrower friction on the two tools most likely to
-  clobber a file the user already has, rather than blocking every mutating
-  surface) — do not assume shell access is otherwise sandboxed against file
-  writes.
+- **Read plane remains separate.** `read_file` is read-only and can inspect
+  paths outside a mutation envelope, except fixed protected system/credential
+  and internal-state paths. An absolute path should be used when reading
+  outside the default workspace.
+- **A write envelope is not a confidentiality or network sandbox.** `bash` and
+  `python_exec` retain outbound network access and can read most paths outside
+  the root except the protected credential/internal paths. The `process_exec`
+  capability also permits writes anywhere inside the selected root without the
+  direct-edit consent nonce. Use a narrow root, least capabilities, and do not
+  run untrusted code when those authorities are unacceptable.
+- **Some effects are outside filesystem containment.** `computer_control` can
+  affect visible applications, and a remote nested MCP can perform whatever
+  effects its own server exposes. Revocation blocks later calls and stops owned
+  background jobs, but it cannot roll back completed effects or reliably cancel
+  a synchronous call that was already running when revocation occurred.
 
-None of the above is a guarantee that this server can safely execute
-arbitrary instructions from an untrusted or compromised MCP client — these
-are defense-in-depth controls for a locally-run, single-user assistant, not
-a multi-tenant security boundary.
+The production grant source is ChatGPT-trusted user intent: ChatGPT must call
+`aegis_start_session` only after the owner authorizes the task and exact root
+in the conversation. There is no second cryptographic human-presence proof.
+These are strong local single-owner controls, not a multi-user OS-account or
+multi-tenant security boundary. `computer_control` can affect visible apps
+outside the filesystem root, subject to its secure-field/destructive guards.
 
 ---
 
@@ -92,13 +116,18 @@ shell, รัน Python, อ่าน/เขียน/แก้ไฟล์, แ
   อินเทอร์เน็ตเข้าถึงเลย ตัว MCP server เองคุยผ่าน stdio กับ
   `tunnel-client` ที่รันอยู่ในเครื่องเท่านั้น — ไม่ listen พอร์ตเครือข่าย
   ใดๆ
-- **ขอบเขตไฟล์ default อยู่ที่ `~/Desktop`** (`V2_WORKSPACE`) อ่าน, สร้าง,
-  และแก้ไฟล์ได้ในนั้น มีรายการ path คุ้มครองที่กำหนดไว้ (SSH/AWS/GPG key,
-  Keychain, ที่เก็บ credential ของ browser/แอป, runtime token ของ repo
-  นี้เอง) ที่ถูกปฏิเสธเสมอไม่ว่า `V2_WORKSPACE` จะตั้งเป็นอะไร
-- **การลบไฟล์ถูกปิดไว้ทุกที่** `bash`/`python_exec` ปฏิเสธคำสั่งประเภท
-  `rm`/`unlink` และ `computer` ปฏิเสธ UI action ที่อ่านได้ว่าเป็นการ
-  ลบ/ทำลาย บังคับในโค้ด ไม่ปล่อยให้โมเดลตัดสินใจเอง
+- **ทุก effectful call ต้องมี AEGIS Working Envelope** คู่ high-entropy
+  `session_id + working_envelope_id` ต้องตรงกัน และเลือก canonical root,
+  capability, สถานะ ACTIVE, วันหมดอายุ และสถานะเพิกถอนที่แก้ไม่ได้ การ bind
+  ใช้ `ContextVar` ต่อ request ไม่ใช้ global current workspace จึงไม่รับสิทธิ์
+  ข้ามแชต
+- **ตรวจ canonical path และ symlink ก่อนอนุญาต** root เป็น immutable และห้าม
+  `/`, home ทั้งก้อน, system root, credential path และ internal state ของระบบ
+- **Shell/Python ใช้ strict write allow-list** `sandbox-exec` deny การเขียนทั้งหมด
+  แล้ว allow เฉพาะ root กับ `/private/tmp`; deny unlink ทั้งหมด ส่วน guarded Git
+  ได้ข้อยกเว้นเฉพาะ metadata ที่เลือกไว้ ไม่รวม source file
+- **การแก้/แทนที่ไฟล์เดิมตรวจ optimistic concurrency** ต้องส่ง SHA-256 จาก
+  `aegis_file_state`; ค่า stale จะคืน `CONCURRENT_MODIFICATION_DETECTED`
 - **การแก้ไฟล์เดิมต้องได้รับอนุญาตในระดับ session** การเรียก `edit` หรือ
   `write_file` แบบ `overwrite=true` บนไฟล์ที่มีอยู่แล้ว ครั้งแรกที่แตะ
   โฟลเดอร์ระดับบนสุดในแต่ละ session จะ fail ด้วย `[permission_required]`
@@ -106,21 +135,27 @@ shell, รัน Python, อ่าน/เขียน/แก้ไฟล์, แ
   (`tools/_edit_grants.py`) นี่คือ workflow gate ที่เสริมด้วยคำสั่งของ
   โมเดลเอง ไม่ใช่การรับประกันทางการเข้ารหัส — ให้มองว่าเป็น friction
   ป้องกันการแก้ไขโดยไม่ได้ตั้งใจหรือประมาท ไม่ใช่ขอบเขตที่แข็งแกร่งต่อ
-  โมเดลที่ถูก jailbreak โดยเจตนา
+  โมเดลที่ถูก jailbreak โดยเจตนา และ nonce จะผูกกับคู่ AEGIS นั้นเท่านั้น
+- **Background job และ nested MCP แยกเจ้าของตามคู่ envelope** คู่หนึ่งไม่สามารถ
+  list/poll/kill job ของอีกคู่ และตอน revoke จะหยุด job ที่เป็นเจ้าของ
 - **`computer` ต้องมีสิทธิ์ macOS Accessibility** และปฏิเสธการโต้ตอบกับ
   ช่องรหัสผ่าน/secure-text นอกจากนี้ยังปฏิเสธ action ที่ target text อ่าน
   ได้ว่าเกี่ยวกับการลบ/ทำลาย แยกต่างหากจาก guard การลบไฟล์ด้านบน
-- **นอก `~/Desktop` ไฟล์เดิมจะไม่ถูกแก้ในที่เดิมเลย** `edit`/`write_file`
-  จะ redirect ไปแก้ที่สำเนา `name.edited.ext` ข้างๆ — ต้นฉบับไม่ถูกแตะ
-- **`bash`/`bash_bg`/`python_exec` รันใน sandbox profile** ที่จำกัดใน
-  workspace และ**ไม่ได้อยู่ใน**ขอบเขตของ permission gate ของ
-  `edit`/`write_file` ด้านบนอย่างชัดเจน — โมเดลยังเขียนไฟล์ผ่าน shell
-  redirection ได้โดยไม่ต้องผ่าน gate นั้น นี่คือ trade-off ที่รู้และ
-  ยอมรับไว้แล้ว (เลือก friction แคบเฉพาะ 2 tool ที่เสี่ยงทำลายไฟล์เดิม
-  มากที่สุด แทนที่จะบล็อกทุกช่องทางที่แก้ไขได้) — อย่าสมมติว่า shell
-  access ถูก sandbox กันการเขียนไฟล์ไว้ด้วยเช่นกัน
+- **Read Plane แยกจาก Mutation Plane** `read_file` อ่านนอก envelope ได้แบบ
+  read-only ยกเว้น system/credential/internal path ที่คุ้มครองไว้
+- **Write envelope ไม่ใช่ confidentiality/network sandbox** `bash` และ
+  `python_exec` ยังออก network ได้และอ่าน path ส่วนใหญ่นอก root ได้ ยกเว้น
+  credential/internal path ที่ป้องกันไว้ และ `process_exec` เขียนได้ทุกจุดใน
+  root โดยไม่ผ่าน nonce ของ direct edit จึงต้องเลือก root แคบและให้ capability
+  เท่าที่จำเป็น
+- **บาง effect อยู่นอกขอบเขต filesystem** `computer_control` กระทบแอปที่มองเห็น
+  ได้ และ remote nested MCP ทำ effect ตามที่ server ปลายทางเปิดไว้ การ revoke
+  ปิด call ถัดไปและหยุด background job ที่เป็นเจ้าของ แต่ย้อนผลที่เสร็จแล้วหรือ
+  รับประกันการยกเลิก synchronous call ที่เริ่มไปแล้วไม่ได้
 
-ไม่มีข้อใดข้างต้นที่รับประกันว่า server นี้จะรันคำสั่งใดๆ จาก MCP client
-ที่ไม่น่าเชื่อถือหรือถูกโจมตีแล้วได้อย่างปลอดภัย — ทั้งหมดนี้คือ
-defense-in-depth control สำหรับผู้ช่วยที่รันในเครื่องเดียว ผู้ใช้คนเดียว
-ไม่ใช่ขอบเขตความปลอดภัยแบบ multi-tenant
+แหล่ง authorization ใน production คือ CHATGPT-TRUSTED USER INTENT: ChatGPT
+ต้องเรียก `aegis_start_session` หลังเจ้าของอนุญาตงานและ root ที่แน่นอนใน
+บทสนทนาแล้วเท่านั้น ไม่มีหลักฐาน human-presence แบบเข้ารหัสจาก UI ที่สอง
+ระบบนี้เป็นขอบเขตสำหรับเครื่องเดียว/เจ้าของเดียว ไม่ใช่ OS account sandbox
+หรือ multi-tenant boundary และ `computer_control` ยังส่งผลต่อแอปที่มองเห็นได้
+นอก filesystem root ภายใต้ secure-field/destructive guard เดิม

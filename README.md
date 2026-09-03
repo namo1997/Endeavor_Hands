@@ -1,4 +1,4 @@
-# Endeavor Hands
+# AEGIS-protected Endeavor Hands
 
 **English** | [ภาษาไทย](#ภาษาไทย)
 
@@ -53,10 +53,11 @@ flowchart LR
     A["ChatGPT Web<br/>(Developer-mode app)"] -->|HTTPS, outbound only| B["OpenAI Secure<br/>MCP Tunnel"]
     B --> C["tunnel-client<br/>(runs on your Mac)"]
     C -->|stdio, no network port| D["server.py<br/>(this repo)"]
-    D --> E["bash / bash_bg /<br/>python_exec / git"]
-    D --> F["read_file / write_file /<br/>edit"]
-    D --> G["computer"]
-    D --> H["mcp_* bridge"]
+    D --> S["AEGIS Security Core<br/>session + immutable envelope"]
+    S --> E["bash / bash_bg /<br/>python_exec / git"]
+    S --> F["read_file / write_file /<br/>edit"]
+    S --> G["computer"]
+    S --> H["mcp_* bridge"]
     E --> E1["Sandboxed shell,<br/>scoped to workspace"]
     F --> F1["Workspace scope +<br/>protected paths +<br/>per-folder permission gate"]
     G --> G1["Accessibility API,<br/>destructive-action +<br/>password-field refusal"]
@@ -71,21 +72,22 @@ the same way, without the tunnel, if it can spawn the process directly.
 
 ## Tools
 
-The server exposes 12 MCP tools. Every tool that can change something on
+The server exposes 16 MCP tools. Every tool that can change something on
 disk or on screen has a guardrail next to it — see `SECURITY.md` for the
 full detail behind each one.
 
 | Tool | What it does | Guardrail |
 |---|---|---|
+| `aegis_start_session`, `aegis_status`, `aegis_file_state`, `aegis_revoke` | Create/inspect/revoke an immutable Working Envelope and obtain file hashes | Exact high-entropy `session_id + working_envelope_id` pair, immutable canonical root/capabilities, expiry, revocation, protected internal SQLite audit state |
 | `bash` | Run a shell command | Runs inside a sandbox profile scoped to the workspace; file-deletion commands are refused |
 | `git` | Guarded repository operations (`status`, `diff`, explicit-path `add`, `commit`, non-force `push`) | Repository must be inside the approved workspace; mutation is scoped to Git metadata; hooks/signing and unsafe transports are disabled; stale non-empty `index.lock` recovery requires a parseable Git index; HTTPS credentials are read directly from the trusted macOS Keychain helper without enabling shell-based helpers |
 | `bash_bg` | Start/poll/kill a background shell job | Same sandbox as `bash`; registry and logs live under `Endeavor_Hands/work/` |
 | `python_exec` | Run Python code with the server's own interpreter | Same sandbox as `bash` |
 | `read_file` | Read text, code, PDF/Word/Excel, images, audio/video | Reads anywhere except a fixed list of protected system/credential paths |
-| `write_file` | Create a new file, or replace one with `overwrite=true` | Outside the workspace, an existing file is never replaced in place (goes to a `name.edited.ext` copy instead); replacing an existing file needs the same permission gate as `edit` |
-| `edit` | Make a targeted change to an existing file | **Needs the user's explicit one-time permission per top-level workspace folder, each session** (`[permission_required]` + a one-time code the model must relay to you) |
+| `write_file` | Create a new file, or replace one with `overwrite=true` | `file_write` capability + path inside the immutable root; existing-file replacement also needs current `expected_hash` and the same permission gate as `edit` |
+| `edit` | Make a targeted change to an existing file | `file_write` capability + path inside the immutable root + current `expected_hash`; also needs the user's explicit one-time permission per top-level folder for that exact envelope |
 | `computer` | See/click/type/scroll/drag, open apps and URLs | Requires macOS Accessibility permission; refuses password/secure-text fields and delete/remove-looking actions |
-| `mcp_list_tools`, `mcp_call_tool`, `mcp_add_server`, `mcp_remove_server` | Bridge to another Streamable HTTP or local stdio MCP server you configure | Dynamic registrations live under `Endeavor_Hands/work/tool_mcp/`; stdio servers use direct argv, no shell, and Hands' sandbox |
+| `mcp_list_tools`, `mcp_call_tool`, `mcp_add_server`, `mcp_remove_server` | Bridge to another Streamable HTTP or local stdio MCP server you configure | Registration is isolated by exact envelope pair in protected internal state; stdio servers use direct argv, no shell, and the strict envelope sandbox |
 
 Activity is shown live on stderr and persisted to `logs/agent_activity.jsonl`.
 MCP protocol messages use stdout exclusively, so do not add normal `print()`
@@ -94,29 +96,41 @@ calls to the server or its tools.
 ## Security at a glance
 
 - **The tunnel is outbound-only** — nothing needs to be exposed to the internet.
-- **The writable workspace defaults to this repo's own `workspace/` folder**
-  (override with `V2_WORKSPACE`). Reads are *not* confined to it — `read_file`
-  can read anywhere except a fixed list of protected paths (SSH/AWS/GPG keys,
-  Keychain, browser/app credential stores) that are refused no matter what.
-  `bash`/`bash_bg`/`python_exec` add a kernel-level `sandbox-exec` layer on
-  top. It is a **deny-list, not an allow-list**: it starts from
-  `(allow default)`, explicitly denies writes to `~/Desktop`, `~/Documents`,
-  `~/Downloads`, `~/Movies`, `~/Music`, `~/Pictures`, `~/.ssh`, `~/.aws`,
-  `~/.config`, `~/.gnupg`, `~/Library`, `/etc`, `/usr`, `/System` and the
-  like, then re-allows the workspace and `/private/tmp` (last match wins).
-  A path in none of those lists — say a folder you created in your home
-  directory — remains writable.
+- **Every effectful call needs an ACTIVE AEGIS Working Envelope.** The exact
+  `session_id + working_envelope_id` pair selects one immutable canonical root,
+  capability set, expiry, and revocation state. IDs from different chats cannot
+  be mixed. Internal grant/audit/registry state is protected from tool access.
+- **Shell/Python writes use a kernel-level allow-list.** In an AEGIS call,
+  `sandbox-exec` first denies every filesystem write, then allows only the
+  immutable working root and `/private/tmp`. Unlink is denied globally; guarded
+  Git receives a narrow exception for its own metadata directory only.
+- **Direct file writes are contained and concurrency-checked.** Existing-file
+  edits/replacements require the SHA-256 returned by `aegis_file_state`; a stale
+  value fails with `CONCURRENT_MODIFICATION_DETECTED`.
 - **File deletion is disabled everywhere** — enforced in code, not left to
   the model's judgment.
-- **Modifying an existing file needs your explicit yes, once per folder,
-  per session.** The model cannot silently start editing a folder you
-  haven't approved.
+- **Direct `edit`/overwrite calls need your explicit yes, once per folder,
+  per envelope.** This is an extra workflow gate for those two tools. Granting
+  `process_exec` already authorizes shell/Python writes anywhere inside the
+  envelope root, so choose a narrow root and least capabilities.
 - **`computer` won't touch password fields**, refuses delete-looking
   actions, and needs Accessibility permission before it can see or control
   anything.
 
-Full detail, including the one accepted gap (shell commands aren't covered
-by the per-folder permission gate), is in [SECURITY.md](SECURITY.md).
+Full detail is in [SECURITY.md](SECURITY.md) and
+[docs/AEGIS_WORKING_ENVELOPES.md](docs/AEGIS_WORKING_ENVELOPES.md).
+
+## Working Envelope workflow
+
+1. The user explicitly authorizes one task root in the conversation.
+2. Call `aegis_start_session` with that existing absolute directory, the
+   least capabilities needed, and a bounded TTL.
+3. Pass the returned exact `sessionId + workingEnvelopeId` pair to every
+   effectful tool. Never reuse a pair from another chat.
+4. Before `edit` or `write_file(overwrite=true)`, call `aegis_file_state` and
+   pass its `sha256` as `expected_hash`.
+5. Call `aegis_revoke` when the task is finished; owned background jobs are
+   stopped and later calls fail closed.
 
 ## Install
 
@@ -191,6 +205,14 @@ ChatGPT web needs a tunnel because it cannot connect to this Mac directly.
 This section is the full walkthrough end to end — for the Thai version see
 [docs/CHATGPT_SETUP_TH.md](docs/CHATGPT_SETUP_TH.md).
 
+This is the subscription route: ChatGPT remains the model/client, and this
+repository does not call the Responses API or require a model-inference API
+key. OpenAI's current developer-mode documentation lists Pro, Plus, Business,
+Enterprise, and Education accounts on the web as eligible and supports both
+read and write MCP tools. A restricted Platform runtime API key is still
+required below, but only to authenticate `tunnel-client` to the tunnel control
+plane.
+
 ### Part A — set up the tunnel (once)
 
 1. In [OpenAI Platform](https://platform.openai.com/), create a tunnel and
@@ -223,16 +245,16 @@ For every launch after this first one, use
 ### Part B — connect it inside ChatGPT
 
 1. Open **ChatGPT on the web** (not the desktop/mobile app) in the same
-   workspace the tunnel is associated with, and make sure **Developer mode**
-   is enabled for that workspace (Settings → look for a Developer mode
-   toggle; the exact label can shift as OpenAI rolls out UI changes).
+   workspace the tunnel is associated with, then enable **Developer mode** at
+   **Settings → Security and login → Developer mode**. Workspace policy may
+   still control whether the toggle is available.
 2. Go to **Settings → Apps & Connectors** (sometimes shown as **Plugins**
    depending on rollout) and click **+ Create** to start a new Developer-mode
    app/connector.
 3. Under **Connection**, choose **Tunnel** — not a URL. Select the tunnel you
    created in Part A by name (or paste its Tunnel ID if it isn't listed yet).
 4. Click **Scan Tools**. ChatGPT connects to the running `tunnel-client` and
-   should list all 11 tool names from the [Tools](#tools) table above. If the
+   should list all 16 tool names from the [Tools](#tools) table above. If the
    scan comes back empty, re-check that the Terminal from Part A step 4-5 is
    still open and `readyz` still reports `ready`.
 5. Save/create the app.
@@ -289,7 +311,7 @@ MIT — see [LICENSE](LICENSE).
 
 # ภาษาไทย
 
-[English](#endeavor-hands)
+[English](#aegis-protected-endeavor-hands)
 
 **โควต้าแยกจาก Codex.** การแชทกับ ChatGPT นับโควต้า/rate limit แยกต่างหากจาก
 OpenAI Codex (coding agent) โดยสิ้นเชิง เมื่อ Codex ติด rate limit หรือ
@@ -337,10 +359,11 @@ flowchart LR
     A["ChatGPT Web<br/>(Developer-mode app)"] -->|HTTPS ขาออกเท่านั้น| B["OpenAI Secure<br/>MCP Tunnel"]
     B --> C["tunnel-client<br/>(รันบน Mac ของคุณ)"]
     C -->|stdio ไม่เปิดพอร์ตเครือข่าย| D["server.py<br/>(repo นี้)"]
-    D --> E["bash / bash_bg /<br/>python_exec / git"]
-    D --> F["read_file / write_file /<br/>edit"]
-    D --> G["computer"]
-    D --> H["mcp_* bridge"]
+    D --> S["AEGIS Security Core<br/>session + working envelope"]
+    S --> E["bash / bash_bg /<br/>python_exec / git"]
+    S --> F["read_file / write_file /<br/>edit"]
+    S --> G["computer"]
+    S --> H["mcp_* bridge"]
     E --> E1["Shell แบบ sandbox<br/>จำกัดใน workspace"]
     F --> F1["ขอบเขต workspace +<br/>protected path +<br/>permission gate ต่อโฟลเดอร์"]
     G --> G1["Accessibility API,<br/>ปฏิเสธ action ทำลาย +<br/>ช่องรหัสผ่าน"]
@@ -355,20 +378,21 @@ Codex CLI, ...) ก็คุยกับ `server.py` แบบเดียวก
 
 ## รายการ Tools
 
-Server เปิด MCP tool 12 ตัว ทุกตัวที่แก้ไขไฟล์หรือหน้าจอได้จะมี guardrail
+Server เปิด MCP tool 16 ตัว ทุกตัวที่แก้ไขไฟล์หรือหน้าจอได้จะมี guardrail
 กำกับไว้ — ดูรายละเอียดเต็มของแต่ละอันได้ที่ `SECURITY.md`
 
 | Tool | ทำอะไร | Guardrail |
 |---|---|---|
+| `aegis_start_session`, `aegis_status`, `aegis_file_state`, `aegis_revoke` | สร้าง/ตรวจ/เพิกถอน Working Envelope และอ่าน hash ของไฟล์ | ใช้คู่ `session_id + working_envelope_id` ที่สุ่มแบบ entropy สูง, root/capability แก้ไม่ได้, มีวันหมดอายุ/เพิกถอน และ audit ใน SQLite ภายในที่ tool แตะไม่ได้ |
 | `bash` | รันคำสั่ง shell | รันใน sandbox profile จำกัดใน workspace; คำสั่งลบไฟล์ถูกปฏิเสธ |
 | `git` | ทำงานกับ repository แบบ guarded (`status`, `diff`, `add` ระบุ path, `commit`, `push` แบบไม่ force) | repo ต้องอยู่ใน workspace ที่อนุมัติ; สิทธิ์ mutation จำกัดที่ Git metadata; ปิด hook/signing และ transport ที่ไม่ปลอดภัย; การกู้ `index.lock` แบบ non-empty ต้องเป็น Git index ที่ parse ได้; HTTPS อ่าน credential โดยตรงจาก trusted macOS Keychain helper โดยไม่เปิด shell-based helper |
 | `bash_bg` | เริ่ม/ตรวจสอบ/ปิด background job | sandbox เดียวกับ `bash`; registry และ log อยู่ใต้ `Endeavor_Hands/work/` |
 | `python_exec` | รัน Python ด้วย interpreter ของ server เอง | sandbox เดียวกับ `bash` |
 | `read_file` | อ่านข้อความ, โค้ด, PDF/Word/Excel, รูปภาพ, เสียง/วิดีโอ | อ่านได้ทุกที่ ยกเว้น path ระบบ/credential ที่กำหนดไว้ตายตัว |
-| `write_file` | สร้างไฟล์ใหม่ หรือแทนที่ทั้งไฟล์ด้วย `overwrite=true` | นอก workspace ไฟล์เดิมจะไม่ถูกแทนที่ตรงๆ (ไปแก้ที่สำเนา `name.edited.ext` แทน); การแทนที่ไฟล์เดิมต้องผ่าน permission gate เดียวกับ `edit` |
-| `edit` | แก้ไฟล์เดิมเฉพาะจุด | **ต้องได้รับอนุญาตจากผู้ใช้ครั้งเดียวต่อโฟลเดอร์ระดับบนสุด ในแต่ละ session** (`[permission_required]` พร้อมรหัสครั้งเดียวที่โมเดลต้องส่งมาให้คุณยืนยัน) |
+| `write_file` | สร้างไฟล์ใหม่ หรือแทนที่ทั้งไฟล์ด้วย `overwrite=true` | ต้องมี `file_write`, path อยู่ใน root และถ้าแทนที่ไฟล์เดิมต้องมี `expected_hash` ปัจจุบันพร้อม permission gate |
+| `edit` | แก้ไฟล์เดิมเฉพาะจุด | ต้องมี `file_write`, path อยู่ใน root, ใช้ `expected_hash` ปัจจุบัน และได้รับอนุญาตครั้งเดียวต่อโฟลเดอร์สำหรับ envelope คู่นั้น |
 | `computer` | ดู/คลิก/พิมพ์/scroll/ลาก, เปิดแอปและ URL | ต้องมีสิทธิ์ macOS Accessibility; ปฏิเสธช่องรหัสผ่านและ action ที่ดูเหมือนลบ/ทำลาย |
-| `mcp_list_tools`, `mcp_call_tool`, `mcp_add_server`, `mcp_remove_server` | เชื่อมต่อไปยัง MCP server อื่นผ่าน Streamable HTTP หรือ local stdio | dynamic registration อยู่ใต้ `Endeavor_Hands/work/tool_mcp/`; stdio ใช้ argv โดยตรง ไม่ผ่าน shell และอยู่ใน sandbox ของ Hands |
+| `mcp_list_tools`, `mcp_call_tool`, `mcp_add_server`, `mcp_remove_server` | เชื่อมต่อไปยัง MCP server อื่นผ่าน Streamable HTTP หรือ local stdio | registration แยกตามคู่ envelope ใน internal state ที่ tool อ่านไม่ได้; stdio ใช้ argv โดยตรง ไม่ผ่าน shell และอยู่ใน strict sandbox |
 
 กิจกรรมแสดงสดทาง stderr และบันทึกถาวรที่ `logs/agent_activity.jsonl` —
 ข้อความ MCP protocol ใช้ stdout เท่านั้น ห้ามเพิ่ม `print()` ธรรมดาในตัว
@@ -377,25 +401,34 @@ server หรือ tools
 ## ภาพรวมความปลอดภัย
 
 - **Tunnel เป็นขาออกเท่านั้น** — ไม่ต้องเปิดอะไรให้อินเทอร์เน็ตเข้าถึงเลย
-- **workspace ที่เขียนได้ default คือโฟลเดอร์ `workspace/` ในตัว repo เอง**
-  (เปลี่ยนได้ด้วย `V2_WORKSPACE`) ส่วนการ**อ่าน**ไม่ได้จำกัดอยู่แค่ workspace —
-  `read_file` อ่านได้ทั่วเครื่อง ยกเว้น path คุ้มครองตายตัว (SSH/AWS/GPG key,
-  Keychain, ที่เก็บ credential ของ browser/แอป) ที่ถูกปฏิเสธเสมอไม่ว่ากรณีใด
-  ส่วน `bash`/`bash_bg`/`python_exec` มี `sandbox-exec` ระดับ kernel เพิ่มอีกชั้น
-  ซึ่งเป็นแบบ **deny-list ไม่ใช่ allow-list**: เริ่มจาก `(allow default)` แล้ว
-  **deny** การเขียนไปยัง `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Movies`,
-  `~/Music`, `~/Pictures`, `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`,
-  `~/Library`, `/etc`, `/usr`, `/System` ฯลฯ อย่างชัดเจน แล้วค่อย allow
-  workspace กับ `/private/tmp` ต่อท้าย (last-match-wins) — path ที่ไม่ได้อยู่ใน
-  รายการเหล่านี้ เช่นโฟลเดอร์ที่คุณสร้างเองใน home ยังเขียนได้อยู่
+- **ทุก action ที่มีผลต่อเครื่องต้องมี AEGIS Working Envelope ที่ ACTIVE**
+  คู่ `session_id + working_envelope_id` ต้องตรงกัน และผูกกับ canonical root,
+  capability, วันหมดอายุ และสถานะเพิกถอนที่แก้ย้อนหลังไม่ได้ ห้ามนำ ID ข้ามแชตมาปนกัน
+- **Shell/Python ใช้ write allow-list ระดับ `sandbox-exec`** โดย deny การเขียน
+  ทั้งหมดก่อน แล้ว allow เฉพาะ root ของ envelope กับ `/private/tmp` เท่านั้น
+  การ unlink ถูก deny ทั้งหมด ยกเว้น Git metadata แบบระบุจุด
+- **การแก้/แทนที่ไฟล์เดิมตรวจ concurrent modification** ต้องเรียก
+  `aegis_file_state` แล้วส่ง SHA-256 กลับมาเป็น `expected_hash`; ถ้าไฟล์เปลี่ยน
+  ระหว่างนั้นจะหยุดด้วย `CONCURRENT_MODIFICATION_DETECTED`
 - **การลบไฟล์ถูกปิดไว้ทุกที่** — บังคับในโค้ด ไม่ปล่อยให้โมเดลตัดสินใจเอง
-- **การแก้ไฟล์เดิมต้องได้รับ "ใช่" จากคุณก่อน ครั้งเดียวต่อโฟลเดอร์ ต่อ
-  session** โมเดลไม่สามารถแอบแก้โฟลเดอร์ที่คุณยังไม่อนุญาตได้
+- **การเรียก `edit`/overwrite โดยตรงต้องได้รับ "ใช่" จากคุณก่อน ครั้งเดียวต่อ
+  โฟลเดอร์ ต่อ envelope** นี่เป็น workflow gate เพิ่มเติมเฉพาะสอง tool นี้;
+  ถ้าให้ `process_exec` แล้ว Shell/Python เขียนได้ทุกจุดภายใน root จึงควรเลือก
+  root ให้แคบและให้ capability เท่าที่จำเป็น
 - **`computer` ไม่แตะช่องรหัสผ่าน** ปฏิเสธ action ที่ดูเหมือนลบ/ทำลาย และ
   ต้องมีสิทธิ์ Accessibility ก่อนจะเห็นหรือควบคุมอะไรได้เลย
 
-รายละเอียดเต็ม รวมถึงช่องว่างที่ยอมรับไว้ 1 จุด (คำสั่ง shell ไม่ได้อยู่ใน
-permission gate ต่อโฟลเดอร์) อยู่ที่ [SECURITY.md](SECURITY.md)
+รายละเอียดเต็มอยู่ที่ [SECURITY.md](SECURITY.md) และ
+[docs/AEGIS_WORKING_ENVELOPES.md](docs/AEGIS_WORKING_ENVELOPES.md)
+
+## ขั้นตอนใช้ Working Envelope
+
+1. ผู้ใช้อนุญาตงานและ root ที่แน่นอนในบทสนทนาก่อน
+2. เรียก `aegis_start_session` ด้วย absolute path, capability เท่าที่จำเป็น และ TTL จำกัด
+3. ส่งคู่ `sessionId + workingEnvelopeId` เดิมให้ทุก effectful tool ในแชตนั้น
+4. ก่อน `edit` หรือ `write_file(overwrite=true)` ให้เรียก `aegis_file_state`
+   แล้วส่ง `sha256` เป็น `expected_hash`
+5. เมื่องานเสร็จเรียก `aegis_revoke`; background job ของคู่นั้นจะถูกหยุด
 
 ## ติดตั้ง
 
@@ -511,7 +544,7 @@ ChatGPT web ต้องใช้ tunnel เพราะเชื่อมต่
 3. ในหัวข้อ **Connection** เลือก **Tunnel** — ไม่ใช่ URL แล้วเลือก tunnel ที่
    สร้างไว้ในส่วน A ตามชื่อ (หรือใส่ Tunnel ID เองถ้ายังไม่ขึ้นในรายการ)
 4. กด **Scan Tools** ChatGPT จะเชื่อมต่อไปยัง `tunnel-client` ที่รันอยู่ และ
-   ควรเจอ tool ครบทั้ง 11 ตัวตามตาราง [รายการ Tools](#รายการ-tools) ด้านบน ถ้า scan แล้ว
+   ควรเจอ tool ครบทั้ง 16 ตัวตามตาราง [รายการ Tools](#รายการ-tools) ด้านบน ถ้า scan แล้ว
    ไม่เจออะไรเลย ให้ตรวจว่า Terminal จากส่วน A ขั้นตอน 4-5 ยังเปิดอยู่ และ
    `readyz` ยังตอบ `ready`
 5. บันทึก/สร้าง app
